@@ -44,6 +44,11 @@ class Config:
     window: int = 2  # neighbour frames on each side used for the median
     stride: int = 10  # process every Nth video frame
     min_area: int = 200  # drop plume components smaller than this (px)
+    p_src: float = 99.0  # percentile of temp a plume source has to reach
+    sd_min: float = 20.0  # local stddev that tells dithered "lava" from smooth hot metal
+    src_close_k: int = 7  # closing that glues the dither into one source blob
+    src_min_area: int = 120  # drop source blobs smaller than this (px)
+    roi_margin: int = 20  # px of slack around each source's region of interest
     grow_hot: int = 30  # geodesic steps along saturated pixels (2 px each)
     grow_warm: int = 8  # then this many steps into merely warm pixels
     open_k: int = 3  # kernel for speckle removal
@@ -117,21 +122,49 @@ def edge_strength(temp: np.ndarray) -> np.ndarray:
     return cv2.dilate(cv2.magnitude(gx, gy), _kernel(5))
 
 
-def plume_mask(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Config) -> np.ndarray:
-    """0 = background, 1 = halo, 2 = core."""
+def moving_mask(motion: np.ndarray, bg: np.ndarray, cfg: Config, bar: float | None = None):
+    """Pixels changing by more than misregistration can account for.
+
+    How well the frames registered depends on the flight and the resolution -- on
+    the 1080p clip half the pixels carry a residual of 7 -- so the bar is a
+    percentile of the frame's own residual, exactly like the temperatures. On top
+    of that: the drone translates, so a flat affine warp cannot register a 3D
+    scene, and sharp static edges (car roofs, equipment rims) leave a residual
+    proportional to their gradient. Charge each pixel grad_w px worth of that.
+    Gradient measured on the background median, not on the frame -- the plume's own
+    speckle is a strong gradient too, and charging it would erase the plume.
+
+    `bar` is passed in when working on a crop, so the threshold stays the whole
+    frame's and does not drift with whatever happens to be inside the crop.
+    """
+    if bar is None:
+        bar = max(cfg.tau, np.percentile(motion, cfg.p_mot))
+    return motion >= bar + cfg.grad_w * edge_strength(bg)
+
+
+def plume_mask(
+    temp: np.ndarray,
+    motion: np.ndarray,
+    bg: np.ndarray,
+    cfg: Config,
+    roi: tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """0 = background, 1 = halo, 2 = core, over the whole frame.
+
+    `roi` (x0, y0, x1, y1) confines the segmentation to one source's box. The
+    thresholds are still percentiles of the **whole frame** -- a box that is mostly
+    plume would push its own p_hi through the roof and then find nothing.
+    """
     t_hi = np.percentile(temp, cfg.p_hi)
     t_lo = np.percentile(temp, cfg.p_lo)
-    # How well the frames registered depends on the flight and the resolution --
-    # on the 1080p clip half the pixels carry a residual of 7 -- so the motion bar
-    # is a percentile of this frame's own residual, exactly like the temperatures.
-    # On top of that: the drone translates, so a flat affine warp cannot register a
-    # 3D scene, and sharp static edges (car roofs, equipment rims) leave a residual
-    # proportional to their gradient. Charge each pixel grad_w px worth of that.
-    # Gradient measured on the background median, not on the frame -- the plume's
-    # own speckle is a strong gradient too, and charging it would erase the plume.
     bar = max(cfg.tau, np.percentile(motion, cfg.p_mot))
-    moving = motion >= bar + cfg.grad_w * edge_strength(bg)
 
+    shape = temp.shape
+    x0, y0, x1, y1 = roi if roi else (0, 0, shape[1], shape[0])
+    box = (slice(y0, y1), slice(x0, x1))
+    temp, motion, bg = temp[box], motion[box], bg[box]
+
+    moving = moving_mask(motion, bg, cfg, bar)
     seed = ((temp >= t_hi) & moving).astype(np.uint8)
     cand = ((temp >= t_lo) & moving).astype(np.uint8)
 
@@ -157,8 +190,9 @@ def plume_mask(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Config
         for _ in range(steps):
             plume |= cv2.dilate(plume, _kernel(5)) & reach
 
-    mask = plume.copy()
-    mask[(plume > 0) & (temp >= t_hi)] = 2
+    plume[(plume > 0) & (temp >= t_hi)] = 2
+    mask = np.zeros(shape, np.uint8)
+    mask[box] = plume
     return mask
 
 
@@ -166,9 +200,85 @@ def _kernel(k: int) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
 
 
+def sources(temp: np.ndarray, cfg: Config):
+    """(lava mask, boxes) -- where the image looks like lava, i.e. plume sources.
+
+    Above the top of the palette the camera dithers, so the hottest things come out
+    speckled instead of flat. That texture is the signature: high local standard
+    deviation *and* a temperature in the top percentile. Smooth hot metal fails the
+    first test, warm dithered nothing fails the second.
+
+    It finds sources, not plumes -- a dithered heat exchanger looks identical here.
+    What throws those out is the next step: no motion above them, no mask, no source.
+    """
+    f = temp.astype(np.float32)
+    mu = cv2.blur(f, (5, 5))
+    sd = np.sqrt(np.maximum(cv2.blur(f * f, (5, 5)) - mu * mu, 0))
+    lava = ((sd >= cfg.sd_min) & (temp >= np.percentile(temp, cfg.p_src))).astype(np.uint8)
+    # Closing glues the speckle into blobs -- but only just. A wider kernel bridges
+    # the gap between a plume and the hot equipment beside it and merges the two
+    # into one useless box (measured on voo_1: k=7 separates, k=15 does not).
+    lava = cv2.morphologyEx(lava, cv2.MORPH_CLOSE, _kernel(cfg.src_close_k))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(lava, connectivity=8)
+    boxes = [
+        tuple(int(v) for v in stats[i, :4])
+        for i in range(1, n)
+        if stats[i, cv2.CC_STAT_AREA] >= cfg.src_min_area
+    ]
+    return lava, boxes
+
+
+def source_roi(box, moving: np.ndarray, cfg: Config) -> tuple[int, int, int, int]:
+    """Region of interest for one source: everything above its base, cropped in x.
+
+    Plumes rise, so the base of the source is the floor -- that one line is what
+    keeps cars, ground and the plant out, no matter how hot they are. Sideways, the
+    box follows the motion that overlaps the source in x, since a plume drifts with
+    the wind and the box has to drift with it.
+    """
+    h_img, w_img = moving.shape
+    x, y, w, h = box
+    y1 = min(h_img, y + h + cfg.roi_margin)
+
+    n, _, stats, _ = cv2.connectedComponentsWithStats(moving[:y1].astype(np.uint8), 8)
+    edges = [x, x + w]
+    for i in range(1, n):
+        sx, sw, area = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_WIDTH], stats[i, 4]
+        if area >= cfg.min_area and sx < x + w and sx + sw > x:
+            edges += [int(sx), int(sx + sw)]
+    return (
+        max(0, min(edges) - cfg.roi_margin),
+        0,
+        min(w_img, max(edges) + cfg.roi_margin),
+        y1,
+    )
+
+
+def plume_masks(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Config):
+    """[(roi, mask)] -- one entry per source that actually vents something."""
+    _, boxes = sources(temp, cfg)
+    moving = moving_mask(motion, bg, cfg)
+
+    found = []
+    for box in boxes:
+        roi = source_roi(box, moving, cfg)
+        mask = plume_mask(temp, motion, bg, cfg, roi)
+        if mask.any():  # a static hot blob yields nothing and drops out here
+            found.append((roi, mask, int((mask > 0).sum())))
+
+    # Sources stack: the vent structure sits right under its own plume and claims it
+    # a second time. Biggest claim wins, the duplicates underneath go.
+    kept: list[tuple[tuple[int, int, int, int], np.ndarray]] = []
+    for roi, mask, area in sorted(found, key=lambda f: -f[2]):
+        if all(int(((mask > 0) & (k > 0)).sum()) < 0.5 * area for _, k in kept):
+            kept.append((roi, mask))
+    return kept
+
+
 HALO_COLOR = (0, 255, 0)  # BGR: green, the plume's full extent
 CORE_COLOR = (255, 255, 0)  # cyan, the saturated core inside it -- white would
 # vanish against the clipped white plume it is drawn on top of
+ROI_COLOR = (80, 80, 255)  # red, the box the source was allowed to claim
 
 
 def outline(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -183,8 +293,21 @@ def outline(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return out
 
 
+def annotate(frame: np.ndarray, found) -> np.ndarray:
+    """`frame` with every plume outlined, its ROI boxed and its index written."""
+    out = frame.copy()
+    for i, (roi, mask) in enumerate(found):
+        out = outline(out, mask)
+        x0, y0, x1, y1 = roi
+        cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), ROI_COLOR, 1)
+        cv2.putText(
+            out, f"#{i}", (x0 + 4, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, ROI_COLOR, 2, cv2.LINE_AA
+        )
+    return out
+
+
 def iter_masks(path: str, cfg: Config, max_frames: int | None = None):
-    """Yield (frame_index, cropped BGR frame, mask) for every stride-th frame.
+    """Yield (frame_index, cropped BGR frame, [(roi, mask)]) for every stride-th frame.
 
     Frames only start coming out once the buffer holds a full window, so the first
     `window` sampled frames have no output of their own.
@@ -215,7 +338,7 @@ def iter_masks(path: str, cfg: Config, max_frames: int | None = None):
         c_idx, c_frame, center = buf[cfg.window]
         neighbours = [align(t, center) for i, (_, _, t) in enumerate(buf) if i != cfg.window]
         motion, bg = temporal_stats(center, neighbours)
-        yield c_idx, c_frame, plume_mask(center, motion, bg, cfg)
+        yield c_idx, c_frame, plume_masks(center, motion, bg, cfg)
 
         emitted += 1
         if max_frames and emitted >= max_frames:

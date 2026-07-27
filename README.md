@@ -10,9 +10,11 @@ uv run steam-detect voo_1.mp4 --out out/voo_1 --stride 30 --max-frames 20
 open out/voo_1
 ```
 
-Output is the original frame with two contours drawn on it: **green** = the whole
-plume, halo included; **cyan** = the saturated core inside it. Cyan because white
-would disappear against the clipped-white plume it sits on.
+Output per frame: the annotated frame `frame_000120.png`, plus one crop per detected
+source, `frame_000120_src0.png`. Contours are **green** = the whole plume, halo
+included; **cyan** = the saturated core inside it (cyan because white would disappear
+against the clipped-white plume it sits on); **red** = the ROI the source was allowed
+to claim.
 
 ## Tuning them: `steam-tune`
 
@@ -27,7 +29,7 @@ One OpenCV window, a slider per knob, the video playing under the contours.
 |---|---|
 | `space` | play / pause |
 | `.` `,` | step one sampled frame forward / back |
-| `1` `2` `3` | view: contours on the frame · temperature (L) · motion map |
+| `1` `2` `3` `4` | view: contours on the frame · temperature (L) · motion map · lava blobs and candidate source boxes |
 | `s` | write `tune.json` **and** print the equivalent `steam-detect` command |
 | `w` | write the current view as `tuned_<frame>.png` |
 | `q` / `esc` | quit |
@@ -46,8 +48,11 @@ slow part (~60 ms per step once the cache is warm), so playback runs at the spee
 the pipeline allows, not at 30 fps. Views `2` and `3` are worth the keystroke: the
 motion map shows *why* a `p_mot` or `grad_w` change did what it did.
 
-Note `--scale`: percentile knobs are resolution-independent, `min_area` is not — it
-counts pixels of the working image, so halving the scale quarters it.
+Note `--scale`: percentile knobs are resolution-independent, the **area** knobs are
+not — they count pixels of the working image, so `--scale 0.5` quarters every blob.
+At the defaults that means every source falls under `src_min_area` and the app finds
+nothing; divide `min_area` and `src_min_area` by 4 when you halve the scale. The app
+prints the factor at startup.
 
 ## What the data is
 
@@ -75,19 +80,42 @@ and they drive every design choice in `steamdet/plume.py`:
 
 ## Pipeline
 
+Sources first, then one segmentation per source:
+
 ```
 frame → crop pillarbox → L = temperature index
       → align ±window neighbours onto it, median = plume-free background
       → motion = |L - background|
-      → moving  = motion > percentile(motion, p_mot) + grad_w · edge(background)
-      → seed    = (L > p_hi) & moving          hottest and churning
-      → cand    = (L > p_lo) & moving          warm and churning
-      → plume   = components of cand touching a seed        (hysteresis = the halo)
-      → grow geodesically through hot, then warm, pixels    (the anchored jet)
-      → contours of plume and of core, drawn on the frame
+      → moving = motion > percentile(motion, p_mot) + grad_w · edge(background)
+
+  sources: (local stddev ≥ sd_min) & (L > p_src), closed → one box per hot source
+  per source:
+      → ROI: everything above the source base, x-cropped to the motion beside it
+      → seed  = (L > p_hi) & moving         hottest and churning, inside the ROI
+      → cand  = (L > p_lo) & moving         warm and churning, inside the ROI
+      → plume = components of cand touching a seed      (hysteresis = the halo)
+      → grow geodesically through hot, then warm, pixels  (the anchored jet)
+      → empty mask ⇒ the source vents nothing ⇒ dropped
+      → overlapping masks ⇒ the bigger claim wins
 ```
 
-Two of those steps exist because of things the videos actually do:
+Three things make the source step work:
+
+- **The "lava" texture is a real signature.** Above the top of the palette the camera
+  dithers, so off-scale heat comes out speckled rather than flat. High local standard
+  deviation *and* a top-percentile temperature finds exactly those pixels; smooth hot
+  metal fails the first test.
+- **`src_close_k` is delicate.** It glues the speckle into blobs, but one size too
+  wide bridges the plume and the equipment next to it into one useless box — measured
+  on voo_1: `7` separates them, `15` merges them.
+- **The texture alone does not tell plume from equipment** — a dithered heat exchanger
+  looks identical. What rejects it is the ROI: nothing churning above its base means
+  no mask, and no mask means no source. That falls out of the segmentation, with no
+  extra rule.
+
+Contours are drawn per source, each labelled `#0`, `#1`, … with its ROI boxed.
+
+Two more steps exist because of things the videos actually do:
 
 - **`grad_w · edge(background)`** — a flat affine warp cannot register a 3D scene from
   a translating drone, so every sharp static edge leaves a residual proportional to
@@ -117,10 +145,17 @@ turn them.
 | `--stride` | 10 | every Nth frame; also sets how far apart the neighbours are |
 | `--min-area` | 200 | speckle surviving as tiny components |
 
-Observed on these clips: `voo_1` wants `--p-mot 93` to keep the whole anchored column.
-`voo_2` (1080p, faster flight, hot plant everywhere) registers worse — median residual
-7 vs the plume's ~34 — and wants `--p-mot 98.5` to keep the plant out. The 95 default
-sits between them; that spread is the knob earning its place.
+Source knobs live in `Config` and on the tuner's sliders (`--config` carries them to
+the CLI): `p_src` 99.0, `sd_min` 20, `src_close_k` 7, `src_min_area` 120,
+`roi_margin` 20.
+
+Observed on these clips: `voo_1` wants `--p-mot 93` to keep the whole anchored column,
+and yields exactly one source — the equipment on the right is detected as a source and
+then dropped for venting nothing. `voo_2` (1080p, faster flight, hot plant everywhere)
+registers worse — median residual 7 vs the plume's ~34 — and at the default keeps a
+flickering heat exchanger as a second source. It is genuinely hot and genuinely
+churning, so nothing here is wrong; `--p-mot 98.5` drops it. Sources are numbered, so
+a spurious one is now a labelled extra rather than contamination of the plume's mask.
 
 ## Check
 
@@ -128,9 +163,10 @@ sits between them; that spread is the knob earning its place.
 uv run pytest -q
 ```
 
-One synthetic scene: a static hot blob (equipment) and a moving hot blob with a warm
-ring (plume). The mask must contain the moving blob *and* its ring, and must not
-contain the static one.
+Three synthetic checks, no GUI: the plume's warm ring comes along while static hot
+equipment stays out; two dithered sources are both found but only the venting one
+survives, with its mask never reaching below its own base; and a saved `tune.json`
+round-trips with typed flags still winning over the file.
 
 ## Not done
 

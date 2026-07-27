@@ -2,7 +2,15 @@
 
 import numpy as np
 
-from steamdet.plume import Config, build_config, plume_mask, save_config, temporal_stats
+from steamdet.plume import (
+    Config,
+    build_config,
+    plume_mask,
+    plume_masks,
+    save_config,
+    sources,
+    temporal_stats,
+)
 
 
 def scene(plume_x: int) -> np.ndarray:
@@ -26,6 +34,43 @@ def test_moving_plume_kept_with_halo_static_equipment_dropped():
     assert mask[105, 140] == 2, "plume core missing"
     assert mask[85, 140] == 1, "cooler halo not attached to the core"
     assert mask[20:60, 20:60].sum() == 0, "static hot equipment leaked into the mask"
+
+
+def dithered(img, box):
+    """Paint a saturated checkerboard -- how the camera renders off-scale heat."""
+    x0, y0, x1, y1 = box
+    img[y0:y1, x0:x1] = 200
+    img[y0:y1:2, x0:x1:2] = 255
+    img[y0 + 1 : y1 : 2, x0 + 1 : x1 : 2] = 255
+
+
+def sourced_scene(plume_x: int) -> np.ndarray:
+    """Two lava sources -- one venting, one not -- plus a hot 'car' below the vent."""
+    img = np.full((240, 240), 20, np.uint8)
+    dithered(img, (30, 150, 70, 190))  # static equipment: hot, dithered, vents nothing
+    dithered(img, (140, 150, 180, 190))  # the vent
+    img[200:220, 130:200] = 190  # hot car, below the vent's base
+    img[60:150, plume_x - 30 : plume_x + 30] = 150  # halo above the vent
+    img[70:140, plume_x - 12 : plume_x + 12] = 245  # core
+    return img
+
+
+def test_only_the_venting_source_survives_and_stays_above_its_base():
+    cfg = Config(p_hi=95.0, p_lo=80.0, p_mot=90.0, min_area=50, src_min_area=100, close_k=5)
+    center = sourced_scene(160)
+    motion, bg = temporal_stats(
+        center, [sourced_scene(60), sourced_scene(70), sourced_scene(70), sourced_scene(60)]
+    )
+
+    _, boxes = sources(center, cfg)
+    assert len(boxes) == 2, "both dithered blobs are sources"
+
+    found = plume_masks(center, motion, bg, cfg)
+    assert len(found) == 1, "the source that vents nothing must drop out"
+    (_, _, _, y1), mask = found[0]
+    assert mask[100, 160] > 0, "plume missing above its own source"
+    assert mask[y1:].sum() == 0, "mask reached below the source base"
+    assert mask[:, :100].sum() == 0, "mask leaked into the static source's column"
 
 
 def test_saved_config_round_trips_and_explicit_flags_win(tmp_path):

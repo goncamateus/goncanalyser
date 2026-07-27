@@ -3,7 +3,7 @@ from pathlib import Path
 
 import cv2
 
-from .plume import build_config, iter_masks, outline
+from .plume import annotate, build_config, iter_masks
 
 
 def main() -> None:
@@ -37,10 +37,15 @@ def main() -> None:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    for idx, frame, mask in iter_masks(a.video, cfg, a.max_frames):
-        cv2.imwrite(str(out / f"frame_{idx:06d}.png"), outline(frame, mask))
-        core, halo = int((mask == 2).sum()), int((mask == 1).sum())
-        print(f"frame {idx:6d}  core={core:6d}  halo={halo:7d}")
+    for idx, frame, found in iter_masks(a.video, cfg, a.max_frames):
+        img = annotate(frame, found)
+        cv2.imwrite(str(out / f"frame_{idx:06d}.png"), img)
+        if not found:
+            print(f"frame {idx:6d}  no source")
+        for i, ((x0, y0, x1, y1), mask) in enumerate(found):
+            cv2.imwrite(str(out / f"frame_{idx:06d}_src{i}.png"), img[y0:y1, x0:x1])
+            core, halo = int((mask == 2).sum()), int((mask == 1).sum())
+            print(f"frame {idx:6d} #{i} roi={x0},{y0}-{x1},{y1} core={core:6d} halo={halo:7d}")
 
 
 if __name__ == "__main__":

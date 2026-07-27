@@ -6,7 +6,7 @@ that the expensive half of the pipeline -- reading frames, aligning neighbours,
 the temporal median -- does not depend on any knob. Cache that per frame and a
 slider only re-runs `plume_mask`: 17 ms on voo_1, 67 ms on voo_2.
 
-Keys: space play/pause . , step  1 2 3 view  s save  w write PNG  q quit
+Keys: space play/pause . , step  1 2 3 4 view  s save  w write PNG  q quit
 """
 
 import argparse
@@ -17,13 +17,15 @@ import cv2
 import numpy as np
 
 from .plume import (
+    ROI_COLOR,
     Config,
     align,
+    annotate,
     build_config,
     crop_box,
-    outline,
-    plume_mask,
+    plume_masks,
     save_config,
+    sources,
     temp_index,
     temporal_stats,
 )
@@ -43,8 +45,23 @@ KNOBS = [
     ("grow_warm", "grow_warm", 30, 1),
     ("stride", "stride", 60, 1),
     ("window", "window", 5, 1),
+    ("p_src x10", "p_src", 1000, 10),
+    ("sd_min", "sd_min", 60, 1),
+    ("src_close_k", "src_close_k", 31, 1),
+    ("src_min_area", "src_min_area", 2000, 1),
+    ("roi_margin", "roi_margin", 200, 1),
 ]
-INT_FIELDS = {"tau", "min_area", "grow_hot", "grow_warm", "stride", "window"}
+INT_FIELDS = {
+    "tau",
+    "min_area",
+    "grow_hot",
+    "grow_warm",
+    "stride",
+    "window",
+    "src_close_k",
+    "src_min_area",
+    "roi_margin",
+}
 CLI_FLAGS = ("p_hi", "p_lo", "p_mot", "tau", "grad_w", "window", "stride", "min_area")
 
 
@@ -110,16 +127,25 @@ def read_knobs(base: Config) -> Config:
     return Config(**{**asdict(base), **values})
 
 
-def render(view: int, stats, mask) -> np.ndarray:
-    """View 1 = frame, 2 = temperature, 3 = motion. Contours drawn on all three."""
+def render(view: int, stats, found, cfg) -> np.ndarray:
+    """1 = frame, 2 = temperature, 3 = motion, 4 = the lava blobs every source came from.
+
+    The contours go on all four, so each map is read against the same result.
+    """
     frame, temp, motion, _ = stats
     if view == 2:
         base = cv2.applyColorMap(temp, cv2.COLORMAP_INFERNO)
     elif view == 3:
         base = cv2.applyColorMap(np.clip(motion * 4, 0, 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+    elif view == 4:
+        lava, boxes = sources(temp, cfg)
+        base = frame.copy()
+        base[lava > 0] = (0, 255, 255)
+        for x, y, w, h in boxes:  # every candidate, including the ones later dropped
+            cv2.rectangle(base, (x, y), (x + w, y + h), ROI_COLOR, 1)
     else:
         base = frame
-    return outline(base, mask)
+    return annotate(base, found)
 
 
 def hud(img, text: str) -> None:
@@ -142,6 +168,11 @@ def main() -> None:
 
     cfg = build_config(a.config)
     clip = Clip(a.video, a.scale)
+    if a.scale != 1.0:
+        # Areas count pixels of the working image, so half the scale is a quarter of
+        # every blob -- at the defaults every source falls under src_min_area and the
+        # app finds nothing at all. Divide the two area knobs by scale^2 yourself.
+        print(f"scale {a.scale}: divide min_area and src_min_area by {1 / a.scale**2:.0f}")
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     for label, field, hi, scale in KNOBS:
@@ -162,12 +193,17 @@ def main() -> None:
             continue
 
         t0 = time.perf_counter()
-        mask = plume_mask(stats[1], stats[2], stats[3], cfg)
+        found = plume_masks(stats[1], stats[2], stats[3], cfg)
         ms = (time.perf_counter() - t0) * 1000
 
-        img = render(view, stats, mask)
-        core, halo = int((mask == 2).sum()), int((mask == 1).sum())
-        hud(img, f"f{idx} view{view} core={core} halo={halo} mask={ms:.0f}ms {'>' if playing else '||'}")
+        img = render(view, stats, found, cfg)
+        core = sum(int((m == 2).sum()) for _, m in found)
+        halo = sum(int((m == 1).sum()) for _, m in found)
+        hud(
+            img,
+            f"f{idx} view{view} src={len(found)} core={core} halo={halo}"
+            f" {ms:.0f}ms {'>' if playing else '||'}",
+        )
         cv2.imshow(WINDOW, img)
 
         key = cv2.waitKey(1) & 0xFF
@@ -179,7 +215,7 @@ def main() -> None:
             idx, playing = idx + cfg.stride, False
         elif key == ord(","):
             idx, playing = max(0, idx - cfg.stride), False
-        elif key in (ord("1"), ord("2"), ord("3")):
+        elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
             view = key - ord("0")
         elif key == ord("s"):
             save_config(cfg, a.save)
