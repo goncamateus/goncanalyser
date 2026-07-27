@@ -1,13 +1,14 @@
 """One check: the plume moves, the equipment does not, and the halo comes along."""
 
+import cv2
 import numpy as np
 
 from steamdet.plume import (
     Config,
     build_config,
-    frame_mask,
     plume_mask,
     plume_masks,
+    polygons,
     save_config,
     sources,
     temporal_stats,
@@ -84,14 +85,18 @@ def test_kernel_knobs_at_zero_do_not_blow_up():
     plume_masks(center, motion, bg, cfg)
 
 
-def test_label_mask_lets_core_win_over_halo():
-    a, b = np.zeros((10, 10), np.uint8), np.zeros((10, 10), np.uint8)
-    a[2:8, 2:8] = 1  # one plume's halo
-    b[4:6, 4:6] = 2  # another plume's core, overlapping it
+def test_label_polygons_redraw_the_mask_they_came_from():
+    """The json is the only label now, so it has to reproduce the mask it replaced."""
+    mask = np.zeros((120, 120), np.uint8)
+    mask[20:100, 30:90] = 1  # halo
+    mask[40:80, 45:75] = 2  # core inside it
 
-    mask = frame_mask([(None, None, a), (None, None, b)], (10, 10))
-    assert mask[5, 5] == 2, "core must survive an overlapping halo"
-    assert mask[3, 3] == 1 and mask[0, 0] == 0
+    for value in (1, 2):
+        drawn = np.zeros_like(mask)
+        cv2.fillPoly(drawn, [np.array(p, np.int32) for p in polygons(mask, value)], 1)
+        want = (mask >= value).astype(np.uint8)
+        agree = int((drawn == want).sum()) / want.size
+        assert agree > 0.99, f"polygons for {value} redraw {agree:.1%} of the mask"
 
 
 def test_saved_config_round_trips_and_explicit_flags_win(tmp_path):

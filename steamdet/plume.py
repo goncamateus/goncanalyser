@@ -277,34 +277,32 @@ def plume_masks(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Confi
     return kept
 
 
-def frame_mask(found, shape) -> np.ndarray:
-    """The per-source masks merged into one label image: 0 background, 1 halo, 2 core.
-
-    Where two plumes overlap, `maximum` lets core win over halo -- a pixel that is
-    core for anybody is core. Which plume a pixel belongs to is not in here; that
-    lives in the boxes the CLI writes alongside.
-    """
-    mask = np.zeros(shape, np.uint8)
-    for _, _, m in found:
-        np.maximum(mask, m, out=mask)
-    return mask
-
-
 HALO_COLOR = (0, 255, 0)  # BGR: green, the plume's full extent
 CORE_COLOR = (255, 255, 0)  # cyan, the saturated core inside it -- white would
 # vanish against the clipped white plume it is drawn on top of
 ROI_COLOR = (80, 80, 255)  # red, the box the source was allowed to claim
 
 
+def polygons(mask: np.ndarray, value: int) -> list[list[list[int]]]:
+    """Outlines of `mask >= value` as point lists -- the label, and what gets drawn.
+
+    The core is speckled, so its raw mask yields a swarm of pinhole contours; closing
+    first gives one outline of where the core is instead of a hundred true ones. The
+    1 px simplification afterwards is free: the mask is not accurate to a pixel
+    anyway, and without it the file is mostly staircase.
+    """
+    binary = cv2.morphologyEx((mask >= value).astype(np.uint8), cv2.MORPH_CLOSE, _kernel(9))
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    simple = (cv2.approxPolyDP(c, 1.0, True) for c in contours)
+    return [c.reshape(-1, 2).tolist() for c in simple if len(c) >= 3]
+
+
 def outline(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """`frame` with the plume outlined: halo boundary + core boundary."""
     out = frame.copy()
-    # The core is speckled, so its raw mask yields a swarm of pinhole contours.
-    # Close it first: one outline of where the core is beats a hundred true ones.
-    for value, color in ((0, HALO_COLOR), (1, CORE_COLOR)):
-        binary = cv2.morphologyEx((mask > value).astype(np.uint8), cv2.MORPH_CLOSE, _kernel(9))
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(out, contours, -1, color, 2)
+    for value, color in ((1, HALO_COLOR), (2, CORE_COLOR)):
+        polys = [np.array(p, np.int32) for p in polygons(mask, value)]
+        cv2.polylines(out, polys, True, color, 2)
     return out
 
 
