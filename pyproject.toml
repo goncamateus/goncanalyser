@@ -1,0 +1,22 @@
+[project]
+name = "steamdet"
+version = "0.1.0"
+description = "Exploratory OpenCV analysis of thermal steam plumes (hot core + cooler halo)"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+]
+
+[project.scripts]
+steam-detect = "steamdet.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["steamdet*"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
