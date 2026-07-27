@@ -6,7 +6,7 @@ that the expensive half of the pipeline -- reading frames, aligning neighbours,
 the temporal median -- does not depend on any knob. Cache that per frame and a
 slider only re-runs `plume_mask`: 17 ms on voo_1, 67 ms on voo_2.
 
-Keys: space play/pause . , step  1 2 3 4 view  s save  w write PNG  q quit
+Keys: space play/pause . , step  1 2 3 4 view  h help  s save  w write PNG  q quit
 """
 
 import argparse
@@ -31,26 +31,29 @@ from .plume import (
 )
 
 WINDOW = "steam-tune"
-PANEL = "steam-tune params"  # the knobs live in their own window, or they eat the video
+HELP = "steam-tune help"
+# HighGUI has no section header for trackbars -- what it does have is windows, so a
+# section *is* a window. Panels stack on top of each other at first; drag them apart.
+PANELS = ("steam-tune 1 plume", "steam-tune 2 motion", "steam-tune 3 sources")
 
-# (trackbar label, Config field, max, scale) -- HighGUI trackbars are integers, so
-# the percentile knobs live at x10 and get divided on the way out.
+# (panel, trackbar label, Config field, max, scale, what it does) -- HighGUI trackbars
+# are integers, so the percentile knobs live at x10 and get divided on the way out.
 KNOBS = [
-    ("p_hi x10", "p_hi", 1000, 10),
-    ("p_lo x10", "p_lo", 1000, 10),
-    ("p_mot x10", "p_mot", 1000, 10),
-    ("tau", "tau", 40, 1),
-    ("grad_w x10", "grad_w", 60, 10),
-    ("min_area", "min_area", 2000, 1),
-    ("grow_hot", "grow_hot", 60, 1),
-    ("grow_warm", "grow_warm", 30, 1),
-    ("stride", "stride", 60, 1),
-    ("window", "window", 5, 1),
-    ("p_src x10", "p_src", 1000, 10),
-    ("sd_min", "sd_min", 60, 1),
-    ("src_close_k", "src_close_k", 31, 1),
-    ("src_min_area", "src_min_area", 2000, 1),
-    ("roi_margin", "roi_margin", 200, 1),
+    (0, "p_hi x10", "p_hi", 1000, 10, "core threshold: top % of temperature"),
+    (0, "p_lo x10", "p_lo", 1000, 10, "floor: below this % nothing is plume"),
+    (0, "min_area", "min_area", 2000, 1, "drop plume blobs smaller than this"),
+    (0, "grow_hot", "grow_hot", 60, 1, "steps grown along the saturated column"),
+    (0, "grow_warm", "grow_warm", 30, 1, "steps grown into the cooler halo"),
+    (1, "p_mot x10", "p_mot", 1000, 10, "motion bar: % of this frame's residual"),
+    (1, "tau", "tau", 40, 1, "floor for the bar: static scene stays empty"),
+    (1, "grad_w x10", "grad_w", 60, 10, "px of misalignment forgiven at edges"),
+    (1, "stride", "stride", 60, 1, "process every Nth frame"),
+    (1, "window", "window", 5, 1, "neighbour frames per side for the median"),
+    (2, "p_src x10", "p_src", 1000, 10, "source threshold: top % of temperature"),
+    (2, "sd_min", "sd_min", 60, 1, "local stddev that marks dithered lava"),
+    (2, "src_close_k", "src_close_k", 31, 1, "glue speckle: too wide merges plume+plant"),
+    (2, "src_min_area", "src_min_area", 2000, 1, "drop source blobs smaller than this"),
+    (2, "roi_margin", "roi_margin", 200, 1, "slack around each source's ROI"),
 ]
 INT_FIELDS = {
     "tau",
@@ -120,8 +123,8 @@ class Clip:
 def read_knobs(base: Config) -> Config:
     """Current trackbar positions as a Config, keeping `base` for untuned fields."""
     values = {}
-    for label, field, _, scale in KNOBS:
-        raw = cv2.getTrackbarPos(label, PANEL) / scale
+    for panel, label, field, _, scale, _doc in KNOBS:
+        raw = cv2.getTrackbarPos(label, PANELS[panel]) / scale
         if field in ("stride", "window"):
             raw = max(1, raw)  # a stride or window of zero is a crash, not a setting
         values[field] = int(raw) if field in INT_FIELDS else raw
@@ -147,6 +150,26 @@ def render(view: int, stats, found, cfg) -> np.ndarray:
     else:
         base = frame
     return annotate(base, found)
+
+
+def help_image(cfg: Config) -> np.ndarray:
+    """The floating cheat sheet: every knob, its current value and what it does."""
+    rows = ["keys: space play  . , step  1-4 view  h help  s save  w png  q quit", ""]
+    for panel in range(len(PANELS)):
+        rows.append(PANELS[panel].split(" ", 1)[1].upper())
+        rows += [
+            f"   {field:<13}{getattr(cfg, field):>7} : {doc}"
+            for p, _lbl, field, _hi, _sc, doc in KNOBS
+            if p == panel
+        ]
+        rows.append("")
+    img = np.zeros((22 * len(rows) + 10, 660, 3), np.uint8)
+    for i, row in enumerate(rows):
+        colour = (120, 220, 255) if row[:1].isdigit() else (230, 230, 230)  # section heads
+        cv2.putText(
+            img, row, (10, 22 * i + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, colour, 1, cv2.LINE_AA
+        )
+    return img
 
 
 def hud(img, text: str) -> None:
@@ -176,13 +199,19 @@ def main() -> None:
         print(f"scale {a.scale}: divide min_area and src_min_area by {1 / a.scale**2:.0f}")
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(PANEL, cv2.WINDOW_NORMAL)
-    for label, field, hi, scale in KNOBS:
-        cv2.createTrackbar(label, PANEL, int(getattr(cfg, field) * scale), hi, lambda _: None)
+    for name in PANELS:
+        cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+    for panel, label, field, hi, scale, _doc in KNOBS:
+        cv2.createTrackbar(
+            label, PANELS[panel], int(getattr(cfg, field) * scale), hi, lambda _: None
+        )
+    for panel, name in enumerate(PANELS):
+        cv2.resizeWindow(name, 420, 34 * sum(1 for k in KNOBS if k[0] == panel))
     # The seek bar is the one control that belongs on the video, like any player.
     cv2.createTrackbar("frame", WINDOW, 0, max(1, clip.count - 1), lambda _: None)
-    cv2.resizeWindow(PANEL, 420, 34 * len(KNOBS))
     panel_strip = np.zeros((1, 420, 3), np.uint8)  # HighGUI needs something to draw
+    cv2.namedWindow(HELP, cv2.WINDOW_NORMAL)
+    helping = True
 
     idx, shown, playing, view = 0, 0, False, 1
     while True:
@@ -210,7 +239,10 @@ def main() -> None:
             f" {ms:.0f}ms {'>' if playing else '||'}",
         )
         cv2.imshow(WINDOW, img)
-        cv2.imshow(PANEL, panel_strip)
+        for name in PANELS:
+            cv2.imshow(name, panel_strip)
+        if helping:
+            cv2.imshow(HELP, help_image(cfg))
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
@@ -223,6 +255,12 @@ def main() -> None:
             idx, playing = max(0, idx - cfg.stride), False
         elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
             view = key - ord("0")
+        elif key == ord("h"):
+            helping = not helping
+            if not helping:
+                cv2.destroyWindow(HELP)
+            else:
+                cv2.namedWindow(HELP, cv2.WINDOW_NORMAL)
         elif key == ord("s"):
             save_config(cfg, a.save)
             print(f"saved {a.save}\n{flag_line(a.video, cfg)}")

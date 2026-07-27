@@ -45,15 +45,19 @@ uv run steam-tune voo_1.mp4              # sliders + playback, contours redraw l
 uv run steam-tune voo_2.mp4 --scale 0.5  # 1080p is slower; work at half size
 ```
 
-Two OpenCV windows: the video on its own, and every knob as a slider in a separate
-`steam-tune params` window. Only the seek bar stays on the video, where a seek bar
-belongs.
+The video gets a window to itself; the knobs are split across three panel windows —
+`1 plume`, `2 motion`, `3 sources` — because HighGUI has no section header for
+trackbars, but it does have windows. A fourth window is a floating cheat sheet with
+every knob's current value and what it does (`h` toggles it). Only the seek bar stays
+on the video, where a seek bar belongs. The panels open stacked on each other; drag
+them apart once.
 
 | key | |
 |---|---|
 | `space` | play / pause |
 | `.` `,` | step one sampled frame forward / back |
 | `1` `2` `3` `4` | view: contours on the frame · temperature (L) · motion map · lava blobs and candidate source boxes |
+| `h` | show / hide the cheat sheet window |
 | `s` | write `tune.json` **and** print the equivalent `steam-detect` command |
 | `w` | write the current view as `tuned_<frame>.png` |
 | `q` / `esc` | quit |
