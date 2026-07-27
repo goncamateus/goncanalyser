@@ -255,7 +255,7 @@ def source_roi(box, moving: np.ndarray, cfg: Config) -> tuple[int, int, int, int
 
 
 def plume_masks(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Config):
-    """[(roi, mask)] -- one entry per source that actually vents something."""
+    """[(roi, source box, mask)] -- one entry per source that actually vents something."""
     _, boxes = sources(temp, cfg)
     moving = moving_mask(motion, bg, cfg)
 
@@ -264,15 +264,28 @@ def plume_masks(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Confi
         roi = source_roi(box, moving, cfg)
         mask = plume_mask(temp, motion, bg, cfg, roi)
         if mask.any():  # a static hot blob yields nothing and drops out here
-            found.append((roi, mask, int((mask > 0).sum())))
+            found.append((roi, box, mask, int((mask > 0).sum())))
 
     # Sources stack: the vent structure sits right under its own plume and claims it
     # a second time. Biggest claim wins, the duplicates underneath go.
-    kept: list[tuple[tuple[int, int, int, int], np.ndarray]] = []
-    for roi, mask, area in sorted(found, key=lambda f: -f[2]):
-        if all(int(((mask > 0) & (k > 0)).sum()) < 0.5 * area for _, k in kept):
-            kept.append((roi, mask))
+    kept = []
+    for roi, box, mask, area in sorted(found, key=lambda f: -f[3]):
+        if all(int(((mask > 0) & (k > 0)).sum()) < 0.5 * area for _, _, k in kept):
+            kept.append((roi, box, mask))
     return kept
+
+
+def frame_mask(found, shape) -> np.ndarray:
+    """The per-source masks merged into one label image: 0 background, 1 halo, 2 core.
+
+    Where two plumes overlap, `maximum` lets core win over halo -- a pixel that is
+    core for anybody is core. Which plume a pixel belongs to is not in here; that
+    lives in the boxes the CLI writes alongside.
+    """
+    mask = np.zeros(shape, np.uint8)
+    for _, _, m in found:
+        np.maximum(mask, m, out=mask)
+    return mask
 
 
 HALO_COLOR = (0, 255, 0)  # BGR: green, the plume's full extent
@@ -296,7 +309,7 @@ def outline(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
 def annotate(frame: np.ndarray, found) -> np.ndarray:
     """`frame` with every plume outlined, its ROI boxed and its index written."""
     out = frame.copy()
-    for i, (roi, mask) in enumerate(found):
+    for i, (roi, _, mask) in enumerate(found):
         out = outline(out, mask)
         x0, y0, x1, y1 = roi
         cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), ROI_COLOR, 1)

@@ -10,11 +10,33 @@ uv run steam-detect voo_1.mp4 --out out/voo_1 --stride 30 --max-frames 20
 open out/voo_1
 ```
 
-Output per frame: the annotated frame `frame_000120.png`, plus one crop per detected
-source, `frame_000120_src0.png`. Contours are **green** = the whole plume, halo
-included; **cyan** = the saturated core inside it (cyan because white would disappear
-against the clipped-white plume it sits on); **red** = the ROI the source was allowed
-to claim.
+Per processed frame, five files under the same prefix:
+
+| file | what it is |
+|---|---|
+| `frame_000120.png` | annotated preview — contours, ROI box, `#0` label |
+| `frame_000120_src0.png` | annotated crop, one per detected source |
+| `frame_000120_clean.png` | the cropped frame with **nothing drawn on it** |
+| `frame_000120_mask.png` | label image: `0` background, `1` halo, `2` core |
+| `frame_000120.json` | boxes and areas per source |
+
+The first two are for your eyes; `_clean` + `_mask` are the training pair. The mask is
+an **index** image, not a grayscale one — open it in a viewer and it looks black, which
+is correct: it is what a segmentation net consumes. Where two plumes overlap, core wins
+over halo. Which plume a pixel belongs to is not in the mask, it is in the JSON:
+
+```json
+{"frame": 90, "size": [640, 512],
+ "sources": [{"roi": [84, 0, 293, 313], "box": [128, 194, 137, 99],
+              "core_px": 1252, "halo_px": 7531}]}
+```
+
+`roi` is `x0,y0,x1,y1` (the box the source was allowed to claim), `box` is `x,y,w,h` of
+the lava blob the source came from.
+
+Contours in the preview: **green** = the whole plume, halo included; **cyan** = the
+saturated core inside it (cyan because white would disappear against the clipped-white
+plume it sits on); **red** = the ROI.
 
 ## Tuning them: `steam-tune`
 
@@ -23,7 +45,9 @@ uv run steam-tune voo_1.mp4              # sliders + playback, contours redraw l
 uv run steam-tune voo_2.mp4 --scale 0.5  # 1080p is slower; work at half size
 ```
 
-One OpenCV window, a slider per knob, the video playing under the contours.
+Two OpenCV windows: the video on its own, and every knob as a slider in a separate
+`steam-tune params` window. Only the seek bar stays on the video, where a seek bar
+belongs.
 
 | key | |
 |---|---|
@@ -163,10 +187,11 @@ a spurious one is now a labelled extra rather than contamination of the plume's 
 uv run pytest -q
 ```
 
-Three synthetic checks, no GUI: the plume's warm ring comes along while static hot
+Four synthetic checks, no GUI: the plume's warm ring comes along while static hot
 equipment stays out; two dithered sources are both found but only the venting one
-survives, with its mask never reaching below its own base; and a saved `tune.json`
-round-trips with typed flags still winning over the file.
+survives, with its mask never reaching below its own base; overlapping plumes merge
+into a label image where core beats halo; and a saved `tune.json` round-trips with
+typed flags still winning over the file.
 
 ## Not done
 

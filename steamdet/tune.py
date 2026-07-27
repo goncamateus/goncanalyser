@@ -31,6 +31,7 @@ from .plume import (
 )
 
 WINDOW = "steam-tune"
+PANEL = "steam-tune params"  # the knobs live in their own window, or they eat the video
 
 # (trackbar label, Config field, max, scale) -- HighGUI trackbars are integers, so
 # the percentile knobs live at x10 and get divided on the way out.
@@ -120,7 +121,7 @@ def read_knobs(base: Config) -> Config:
     """Current trackbar positions as a Config, keeping `base` for untuned fields."""
     values = {}
     for label, field, _, scale in KNOBS:
-        raw = cv2.getTrackbarPos(label, WINDOW) / scale
+        raw = cv2.getTrackbarPos(label, PANEL) / scale
         if field in ("stride", "window"):
             raw = max(1, raw)  # a stride or window of zero is a crash, not a setting
         values[field] = int(raw) if field in INT_FIELDS else raw
@@ -175,9 +176,13 @@ def main() -> None:
         print(f"scale {a.scale}: divide min_area and src_min_area by {1 / a.scale**2:.0f}")
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(PANEL, cv2.WINDOW_NORMAL)
     for label, field, hi, scale in KNOBS:
-        cv2.createTrackbar(label, WINDOW, int(getattr(cfg, field) * scale), hi, lambda _: None)
+        cv2.createTrackbar(label, PANEL, int(getattr(cfg, field) * scale), hi, lambda _: None)
+    # The seek bar is the one control that belongs on the video, like any player.
     cv2.createTrackbar("frame", WINDOW, 0, max(1, clip.count - 1), lambda _: None)
+    cv2.resizeWindow(PANEL, 420, 34 * len(KNOBS))
+    panel_strip = np.zeros((1, 420, 3), np.uint8)  # HighGUI needs something to draw
 
     idx, shown, playing, view = 0, 0, False, 1
     while True:
@@ -197,14 +202,15 @@ def main() -> None:
         ms = (time.perf_counter() - t0) * 1000
 
         img = render(view, stats, found, cfg)
-        core = sum(int((m == 2).sum()) for _, m in found)
-        halo = sum(int((m == 1).sum()) for _, m in found)
+        core = sum(int((m == 2).sum()) for *_, m in found)
+        halo = sum(int((m == 1).sum()) for *_, m in found)
         hud(
             img,
             f"f{idx} view{view} src={len(found)} core={core} halo={halo}"
             f" {ms:.0f}ms {'>' if playing else '||'}",
         )
         cv2.imshow(WINDOW, img)
+        cv2.imshow(PANEL, panel_strip)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:

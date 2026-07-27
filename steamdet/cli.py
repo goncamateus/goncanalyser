@@ -1,9 +1,10 @@
 import argparse
+import json
 from pathlib import Path
 
 import cv2
 
-from .plume import annotate, build_config, iter_masks
+from .plume import annotate, build_config, frame_mask, iter_masks
 
 
 def main() -> None:
@@ -38,14 +39,31 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     for idx, frame, found in iter_masks(a.video, cfg, a.max_frames):
+        stem = str(out / f"frame_{idx:06d}")
         img = annotate(frame, found)
-        cv2.imwrite(str(out / f"frame_{idx:06d}.png"), img)
+        cv2.imwrite(f"{stem}.png", img)
+        # The training pair: the frame with nothing drawn on it, and the label image.
+        # The label is an index mask (0/1/2), so it looks black in a viewer -- that is
+        # what a segmentation net wants; the annotated png next to it is for eyes.
+        cv2.imwrite(f"{stem}_clean.png", frame)
+        cv2.imwrite(f"{stem}_mask.png", frame_mask(found, frame.shape[:2]))
+
+        meta = {"frame": idx, "size": [frame.shape[1], frame.shape[0]], "sources": []}
         if not found:
             print(f"frame {idx:6d}  no source")
-        for i, ((x0, y0, x1, y1), mask) in enumerate(found):
-            cv2.imwrite(str(out / f"frame_{idx:06d}_src{i}.png"), img[y0:y1, x0:x1])
+        for i, ((x0, y0, x1, y1), box, mask) in enumerate(found):
+            cv2.imwrite(f"{stem}_src{i}.png", img[y0:y1, x0:x1])
             core, halo = int((mask == 2).sum()), int((mask == 1).sum())
+            meta["sources"].append(
+                {
+                    "roi": [x0, y0, x1, y1],
+                    "box": [int(v) for v in box],
+                    "core_px": core,
+                    "halo_px": halo,
+                }
+            )
             print(f"frame {idx:6d} #{i} roi={x0},{y0}-{x1},{y1} core={core:6d} halo={halo:7d}")
+        Path(f"{stem}.json").write_text(json.dumps(meta) + "\n")
 
 
 if __name__ == "__main__":

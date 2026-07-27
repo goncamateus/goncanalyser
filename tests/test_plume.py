@@ -5,6 +5,7 @@ import numpy as np
 from steamdet.plume import (
     Config,
     build_config,
+    frame_mask,
     plume_mask,
     plume_masks,
     save_config,
@@ -67,10 +68,20 @@ def test_only_the_venting_source_survives_and_stays_above_its_base():
 
     found = plume_masks(center, motion, bg, cfg)
     assert len(found) == 1, "the source that vents nothing must drop out"
-    (_, _, _, y1), mask = found[0]
+    (_, _, _, y1), _, mask = found[0]
     assert mask[100, 160] > 0, "plume missing above its own source"
     assert mask[y1:].sum() == 0, "mask reached below the source base"
     assert mask[:, :100].sum() == 0, "mask leaked into the static source's column"
+
+
+def test_label_mask_lets_core_win_over_halo():
+    a, b = np.zeros((10, 10), np.uint8), np.zeros((10, 10), np.uint8)
+    a[2:8, 2:8] = 1  # one plume's halo
+    b[4:6, 4:6] = 2  # another plume's core, overlapping it
+
+    mask = frame_mask([(None, None, a), (None, None, b)], (10, 10))
+    assert mask[5, 5] == 2, "core must survive an overlapping halo"
+    assert mask[3, 3] == 1 and mask[0, 0] == 0
 
 
 def test_saved_config_round_trips_and_explicit_flags_win(tmp_path):
