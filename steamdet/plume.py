@@ -11,8 +11,10 @@ parte" -- warm but static ground never connects, and warm moving vegetation neve
 touches the core.
 """
 
+import json
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -46,6 +48,24 @@ class Config:
     grow_warm: int = 8  # then this many steps into merely warm pixels
     open_k: int = 3  # kernel for speckle removal
     close_k: int = 7  # kernel for filling the wispy halo
+
+
+def build_config(path: str | None = None, **overrides) -> Config:
+    """Defaults, then a saved JSON, then whatever was passed explicitly.
+
+    `overrides` come straight from argparse, where a knob nobody typed is None --
+    those must not clobber the file, which is the whole point of saving one.
+    """
+    known = {f.name for f in fields(Config)}
+    data = {}
+    if path:
+        data = {k: v for k, v in json.loads(Path(path).read_text()).items() if k in known}
+    data.update({k: v for k, v in overrides.items() if v is not None})
+    return Config(**data)
+
+
+def save_config(cfg: Config, path: str) -> None:
+    Path(path).write_text(json.dumps(asdict(cfg), indent=2) + "\n")
 
 
 def crop_box(frame: np.ndarray) -> tuple[int, int, int, int]:
@@ -144,6 +164,23 @@ def plume_mask(temp: np.ndarray, motion: np.ndarray, bg: np.ndarray, cfg: Config
 
 def _kernel(k: int) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+
+
+HALO_COLOR = (0, 255, 0)  # BGR: green, the plume's full extent
+CORE_COLOR = (255, 255, 0)  # cyan, the saturated core inside it -- white would
+# vanish against the clipped white plume it is drawn on top of
+
+
+def outline(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """`frame` with the plume outlined: halo boundary + core boundary."""
+    out = frame.copy()
+    # The core is speckled, so its raw mask yields a swarm of pinhole contours.
+    # Close it first: one outline of where the core is beats a hundred true ones.
+    for value, color in ((0, HALO_COLOR), (1, CORE_COLOR)):
+        binary = cv2.morphologyEx((mask > value).astype(np.uint8), cv2.MORPH_CLOSE, _kernel(9))
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, contours, -1, color, 2)
+    return out
 
 
 def iter_masks(path: str, cfg: Config, max_frames: int | None = None):

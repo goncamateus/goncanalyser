@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 steam-detect = "steamdet.cli:main"
+steam-tune = "steamdet.tune:main"
 
 [dependency-groups]
 dev = ["pytest"]

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from steamdet.plume import Config, plume_mask, temporal_stats
+from steamdet.plume import Config, build_config, plume_mask, save_config, temporal_stats
 
 
 def scene(plume_x: int) -> np.ndarray:
@@ -26,3 +26,13 @@ def test_moving_plume_kept_with_halo_static_equipment_dropped():
     assert mask[105, 140] == 2, "plume core missing"
     assert mask[85, 140] == 1, "cooler halo not attached to the core"
     assert mask[20:60, 20:60].sum() == 0, "static hot equipment leaked into the mask"
+
+
+def test_saved_config_round_trips_and_explicit_flags_win(tmp_path):
+    path = str(tmp_path / "tune.json")
+    save_config(Config(p_hi=99.5, p_mot=93.0, grow_hot=42), path)
+
+    assert build_config(path) == Config(p_hi=99.5, p_mot=93.0, grow_hot=42)
+    # None means "not typed on the command line" and must not clobber the file.
+    merged = build_config(path, p_mot=98.5, tau=None)
+    assert (merged.p_mot, merged.p_hi, merged.grow_hot) == (98.5, 99.5, 42)

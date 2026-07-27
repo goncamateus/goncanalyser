@@ -14,6 +14,41 @@ Output is the original frame with two contours drawn on it: **green** = the whol
 plume, halo included; **cyan** = the saturated core inside it. Cyan because white
 would disappear against the clipped-white plume it sits on.
 
+## Tuning them: `steam-tune`
+
+```bash
+uv run steam-tune voo_1.mp4              # sliders + playback, contours redraw live
+uv run steam-tune voo_2.mp4 --scale 0.5  # 1080p is slower; work at half size
+```
+
+One OpenCV window, a slider per knob, the video playing under the contours.
+
+| key | |
+|---|---|
+| `space` | play / pause |
+| `.` `,` | step one sampled frame forward / back |
+| `1` `2` `3` | view: contours on the frame · temperature (L) · motion map |
+| `s` | write `tune.json` **and** print the equivalent `steam-detect` command |
+| `w` | write the current view as `tuned_<frame>.png` |
+| `q` / `esc` | quit |
+
+Then feed the result straight back in — flags typed on the command line still win
+over the file:
+
+```bash
+uv run steam-detect voo_1.mp4 --out out/voo_1 --config tune.json
+```
+
+Dragging a slider is instant (17 ms on voo_1, 67 ms on voo_2) because no knob feeds
+the expensive half of the pipeline — frame decoding, ORB alignment, the temporal
+median are cached per frame, and only `plume_mask` re-runs. Changing frames is the
+slow part (~60 ms per step once the cache is warm), so playback runs at the speed
+the pipeline allows, not at 30 fps. Views `2` and `3` are worth the keystroke: the
+motion map shows *why* a `p_mot` or `grad_w` change did what it did.
+
+Note `--scale`: percentile knobs are resolution-independent, `min_area` is not — it
+counts pixels of the working image, so halving the scale quarters it.
+
 ## What the data is
 
 |  | voo_1 | voo_2 |
