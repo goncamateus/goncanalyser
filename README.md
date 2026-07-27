@@ -2,7 +2,7 @@
 
 Exploratory OpenCV analysis of two drone thermal videos (`voo_1.mp4`, `voo_2.mp4`):
 find the steam plume — the saturated hot core **and** the cooler halo around it that
-still belongs to the plume — and dump a mask per frame.
+still belongs to the plume — and draw its outline on the frame.
 
 ```bash
 uv sync
@@ -10,8 +10,9 @@ uv run steam-detect voo_1.mp4 --out out/voo_1 --stride 30 --max-frames 20
 open out/voo_1
 ```
 
-Masks are grayscale PNGs: `0` background, `127` halo, `255` core. Inspectable
-straight from Finder, no viewer needed.
+Output is the original frame with two contours drawn on it: **green** = the whole
+plume, halo included; **cyan** = the saturated core inside it. Cyan because white
+would disappear against the clipped-white plume it sits on.
 
 ## What the data is
 
@@ -48,7 +49,7 @@ frame → crop pillarbox → L = temperature index
       → cand    = (L > p_lo) & moving          warm and churning
       → plume   = components of cand touching a seed        (hysteresis = the halo)
       → grow geodesically through hot, then warm, pixels    (the anchored jet)
-      → PNG 0 / 127 / 255
+      → contours of plume and of core, drawn on the frame
 ```
 
 Two of those steps exist because of things the videos actually do:
@@ -74,17 +75,17 @@ turn them.
 |---|---|---|
 | `--p-hi` | 99.0 | core too small / too greedy |
 | `--p-lo` | 90.0 | halo cut off early (lower) or bleeding into warm ground (raise) |
-| `--p-mot` | 97.0 | plant leaking into the mask (raise) / plume fragmenting (lower) |
+| `--p-mot` | 95.0 | plant leaking into the mask (raise) / plume fragmenting (lower) |
 | `--tau` | 6 | floor for the motion bar; keeps a static scene empty |
 | `--grad-w` | 1.5 | static edges still firing (raise) |
 | `--window` | 2 | neighbours per side used for the median |
 | `--stride` | 10 | every Nth frame; also sets how far apart the neighbours are |
 | `--min-area` | 200 | speckle surviving as tiny components |
 
-Observed on these clips: `voo_1` is clean at the defaults. `voo_2` (1080p, faster
-flight, hot plant everywhere) registers worse — median residual 7 vs the plume's ~34 —
-and keeps one flickering burner in the mask. Raise `--p-mot` to trade it for a thinner
-halo.
+Observed on these clips: `voo_1` wants `--p-mot 93` to keep the whole anchored column.
+`voo_2` (1080p, faster flight, hot plant everywhere) registers worse — median residual
+7 vs the plume's ~34 — and wants `--p-mot 98.5` to keep the plant out. The 95 default
+sits between them; that spread is the knob earning its place.
 
 ## Check
 

@@ -36,7 +36,7 @@ class Config:
     # All of these are calibration knobs, not constants -- see README.
     p_hi: float = 99.0  # percentile of temp index for the saturated core
     p_lo: float = 90.0  # percentile below which a pixel is background, period
-    p_mot: float = 97.0  # percentile of the residual above which a pixel is "moving"
+    p_mot: float = 95.0  # percentile of the residual above which a pixel is "moving"
     tau: int = 6  # floor for that threshold, so a static scene stays empty
     grad_w: float = 1.5  # px of residual misalignment tolerated (see plume_mask)
     window: int = 2  # neighbour frames on each side used for the median
@@ -147,7 +147,11 @@ def _kernel(k: int) -> np.ndarray:
 
 
 def iter_masks(path: str, cfg: Config, max_frames: int | None = None):
-    """Yield (frame_index, mask) for every stride-th frame that has a full window."""
+    """Yield (frame_index, cropped BGR frame, mask) for every stride-th frame.
+
+    Frames only start coming out once the buffer holds a full window, so the first
+    `window` sampled frames have no output of their own.
+    """
     cap = cv2.VideoCapture(path)
     ok, first = cap.read()
     if not ok:
@@ -156,7 +160,7 @@ def iter_masks(path: str, cfg: Config, max_frames: int | None = None):
     x, y, w, h = crop_box(first)
     print(f"crop={w}x{h}+{x}+{y}")
 
-    buf: deque[tuple[int, np.ndarray]] = deque(maxlen=2 * cfg.window + 1)
+    buf: deque[tuple[int, np.ndarray, np.ndarray]] = deque(maxlen=2 * cfg.window + 1)
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     idx, emitted = -1, 0
     while True:
@@ -166,14 +170,15 @@ def iter_masks(path: str, cfg: Config, max_frames: int | None = None):
         idx += 1
         if idx % cfg.stride:
             continue
-        buf.append((idx, temp_index(frame[y : y + h, x : x + w])))
+        crop = frame[y : y + h, x : x + w]
+        buf.append((idx, crop, temp_index(crop)))
         if len(buf) < buf.maxlen:
             continue
 
-        c_idx, center = buf[cfg.window]
-        neighbours = [align(t, center) for i, (_, t) in enumerate(buf) if i != cfg.window]
+        c_idx, c_frame, center = buf[cfg.window]
+        neighbours = [align(t, center) for i, (_, _, t) in enumerate(buf) if i != cfg.window]
         motion, bg = temporal_stats(center, neighbours)
-        yield c_idx, plume_mask(center, motion, bg, cfg)
+        yield c_idx, c_frame, plume_mask(center, motion, bg, cfg)
 
         emitted += 1
         if max_frames and emitted >= max_frames:
