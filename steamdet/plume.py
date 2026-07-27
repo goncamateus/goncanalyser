@@ -294,7 +294,11 @@ def polygons(mask: np.ndarray, value: int) -> list[list[list[int]]]:
     binary = cv2.morphologyEx((mask >= value).astype(np.uint8), cv2.MORPH_CLOSE, _kernel(9))
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     simple = (cv2.approxPolyDP(c, 1.0, True) for c in contours)
-    return [c.reshape(-1, 2).tolist() for c in simple if len(c) >= 3]
+    # A few-pixel sliver is noise in a picture and poison in a training set: it teaches
+    # a net that specks are plumes. 32 px is below anything real at these resolutions.
+    return [
+        c.reshape(-1, 2).tolist() for c in simple if len(c) >= 3 and cv2.contourArea(c) >= 32
+    ]
 
 
 def outline(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:

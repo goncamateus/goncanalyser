@@ -36,6 +36,29 @@ In the tuner those contours are **green** = the whole plume, halo included; **cy
 the saturated core (cyan because white would disappear against the clipped-white plume
 it sits on); **red** = the ROI.
 
+Polygons under 32 px are dropped. A speck like that is invisible in a picture and
+poison in a training set — it teaches a net that specks are plumes.
+
+### Dataset formats
+
+```bash
+uv run steam-detect voo_1.mp4 --out out/ds --p-mot 93 --coco   # + annotations.json
+uv run steam-detect voo_1.mp4 --out out/ds --p-mot 93 --yolo   # + images/ labels/ data.yaml
+```
+
+Both classes appear in both formats: `plume` (halo included) and `core`, overlapping on
+purpose — core is a region *inside* plume, which both formats allow. Both are built
+from the same polygons as the JSON, so the three never disagree.
+
+- `--coco` accumulates one `annotations.json` for the run: `segmentation` as flat
+  `[x,y,x,y,…]` polygons, `bbox` and `area` taken from those same points, category ids
+  1 = plume, 2 = core.
+- `--yolo` writes **segmentation** labels (`cls x1 y1 x2 y2 …`, normalised, one polygon
+  per line) rather than boxes — the polygons already exist, and a detector trained on
+  segmentation labels just ignores the extra points. It also moves the frames into
+  `images/` with labels in `labels/`, because that swap is how ultralytics finds
+  labels; without the flag the output stays flat. `data.yaml` points at both.
+
 ## Tuning them: `steam-tune`
 
 ```bash
@@ -189,14 +212,16 @@ a spurious one is now a labelled extra rather than contamination of the plume's 
 uv run pytest -q
 ```
 
-Five synthetic checks, no GUI: the plume's warm ring comes along while static hot
+Six synthetic checks, no GUI: the plume's warm ring comes along while static hot
 equipment stays out; two dithered sources are both found but only the venting one
 survives, with its mask never reaching below its own base; a kernel slider at zero
 means "no morphology" instead of a crash; the label polygons redraw the mask they came
-from; and a saved `tune.json` round-trips with typed flags still winning over the file.
+from; the COCO and YOLO exports land on the right coordinates (a swapped axis still
+looks normalised, so the check pins an actual corner); and a saved `tune.json`
+round-trips with typed flags still winning over the file.
 
 ## Not done
 
 - Absolute temperature — needs the radiometric source, not the mp4.
-- COCO/RLE export for `steam-maker`.
+- RLE segmentation (COCO export is polygons), and train/val splitting.
 - Overlay video and per-frame metrics CSV.

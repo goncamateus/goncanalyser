@@ -2,7 +2,9 @@
 
 import cv2
 import numpy as np
+import pytest
 
+from steamdet.export import Coco, yolo_lines
 from steamdet.plume import (
     Config,
     build_config,
@@ -97,6 +99,37 @@ def test_label_polygons_redraw_the_mask_they_came_from():
         want = (mask >= value).astype(np.uint8)
         agree = int((drawn == want).sum()) / want.size
         assert agree > 0.99, f"polygons for {value} redraw {agree:.1%} of the mask"
+
+
+def test_dataset_exports_agree_with_the_polygons():
+    """A wrong normalisation or a swapped axis silently ruins a whole dataset."""
+    mask = np.zeros((100, 200), np.uint8)
+    mask[20:60, 40:120] = 1
+    mask[30:50, 60:100] = 2
+    found = [(None, None, mask)]
+    size = [200, 100]
+
+    lines = yolo_lines(found, size)
+    assert [line[0] for line in lines] == ["0", "1"], "one plume line, one core line"
+    for line in lines:
+        coords = [float(v) for v in line.split()[1:]]
+        assert len(coords) % 2 == 0
+        assert all(0.0 <= v <= 1.0 for v in coords), "yolo coordinates must be normalised"
+    # x normalises by width, y by height -- swapping them still yields 0..1 numbers, so
+    # check a corner: the plume starts at x=40/200, y=20/100.
+    xs = [float(v) for v in lines[0].split()[1::2]]
+    ys = [float(v) for v in lines[0].split()[2::2]]
+    assert min(xs) == pytest.approx(0.2, abs=0.02) and min(ys) == pytest.approx(0.2, abs=0.02)
+
+    coco = Coco()
+    coco.add("frame_000000.png", size, found)
+    assert len(coco.images) == 1 and len(coco.annotations) == 2
+    plume = coco.annotations[0]
+    assert plume["category_id"] == 1 and plume["iscrowd"] == 0
+    assert len(plume["segmentation"][0]) % 2 == 0, "COCO segmentation is a flat x,y list"
+    x, y, w, h = plume["bbox"]
+    assert (x, y) == pytest.approx((40, 20), abs=2) and (w, h) == pytest.approx((80, 40), abs=2)
+    assert plume["area"] == pytest.approx(80 * 40, rel=0.1)
 
 
 def test_saved_config_round_trips_and_explicit_flags_win(tmp_path):
