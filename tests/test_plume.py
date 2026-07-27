@@ -74,6 +74,16 @@ def test_only_the_venting_source_survives_and_stays_above_its_base():
     assert mask[:, :100].sum() == 0, "mask leaked into the static source's column"
 
 
+def test_kernel_knobs_at_zero_do_not_blow_up():
+    """Every kernel slider can be dragged to 0; that means "no morphology", not a crash."""
+    cfg = Config(src_close_k=0, open_k=0, close_k=0, min_area=50, src_min_area=100)
+    center = sourced_scene(160)
+    motion, bg = temporal_stats(center, [sourced_scene(60), sourced_scene(70)])
+
+    sources(center, cfg)
+    plume_masks(center, motion, bg, cfg)
+
+
 def test_label_mask_lets_core_win_over_halo():
     a, b = np.zeros((10, 10), np.uint8), np.zeros((10, 10), np.uint8)
     a[2:8, 2:8] = 1  # one plume's halo

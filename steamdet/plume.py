@@ -197,7 +197,9 @@ def plume_mask(
 
 
 def _kernel(k: int) -> np.ndarray:
-    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    # A slider dragged to zero asks for "no morphology", which OpenCV spells 1x1,
+    # not 0x0 -- getStructuringElement throws on the latter.
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(1, k), max(1, k)))
 
 
 def sources(temp: np.ndarray, cfg: Config):
