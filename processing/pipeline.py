@@ -137,17 +137,27 @@ def odd_kernel(size: int) -> int:
     return size if size % 2 else size + 1
 
 
-def find_contours(bgr: np.ndarray, s: Settings) -> list[np.ndarray]:
-    """Blur -> Canny -> external contours -> drop the ones under `min_area`.
+def find_contours(img: np.ndarray, s: Settings, binary: bool = False) -> list[np.ndarray]:
+    """Blur -> edges (or blobs) -> external contours -> drop those under `min_area`.
+
+    `binary=True` says the input is already a foreground mask, so the blobs *are*
+    the regions and Canny must be skipped. Running Canny on a mask would trace
+    each blob's rim as a thin closed ring, and `min_area` would then measure the
+    area of that ring rather than of the region — a large blob with a two-pixel
+    rim reads as tiny and gets filtered out. Blurring still helps: blur plus
+    re-threshold is a cheap despeckle.
 
     Only the outermost contours are kept: a region with a hole in it is still one
     region, and the hole is rarely what you are counting.
     """
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     k = odd_kernel(s.blur_kernel)
     if k > 1:
         gray = cv2.GaussianBlur(gray, (k, k), 0)
-    edges = cv2.Canny(gray, s.canny_lo, s.canny_hi)
+    if binary:
+        _, edges = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+    else:
+        edges = cv2.Canny(gray, s.canny_lo, s.canny_hi)
     found, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return [c for c in found if cv2.contourArea(c) >= s.min_area]
 
@@ -245,15 +255,19 @@ class BackgroundModel:
         note = f" gmc={inliers}in" if inliers else " gmc=NONE"
         return self._sub.apply(gray, warp), note
 
-    def apply(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, str]:
-        """Motion mask (B/W) or the foreground (mask applied to the colour frame)."""
+    def apply(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, np.ndarray, str]:
+        """(what to display, the raw mask, a note).
+
+        The mask comes back alongside the rendering because the contour stage
+        wants the blobs themselves, not whatever the view mode chose to paint.
+        """
         self._ensure(s)
         mask, note = self._mask(bgr, s)
         if s.mask_only:
-            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), note
+            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), mask, note
         # MOG2 marks shadows as 127 and they survive `bitwise_and`, which is what
         # you want: a shadowed part of a moving object is still the moving object.
-        return cv2.bitwise_and(bgr, bgr, mask=mask), note
+        return cv2.bitwise_and(bgr, bgr, mask=mask), mask, note
 
 
 class Pipeline:
@@ -277,12 +291,15 @@ class Pipeline:
         """
         frame = adjust(bgr, s)
 
-        note = ""
+        note, mask = "", None
         if s.bgsub_on:
-            frame, note = self.background.apply(frame, s)
+            frame, mask, note = self.background.apply(frame, s)
 
         if s.contours_on:
-            contours = find_contours(frame, s)
+            # Trace the mask, not the rendering. In the Foreground view the frame
+            # is a colour cut-out, and Canny on that finds the cut-out's border
+            # and every bit of texture inside it rather than the moving regions.
+            contours = find_contours(mask if mask is not None else frame, s, binary=mask is not None)
             frame = draw_contours(frame, contours)
             note += f" contours={len(contours)}"
 
@@ -315,6 +332,15 @@ def _demo() -> None:
     assert odd_kernel(0) == 1 and odd_kernel(4) == 5
     _, note = pipe.process(frame, replace(base, contours_on=True, blur_kernel=0, min_area=1))
     assert "contours=" in note and "contours=0" not in note, note
+
+    # On a mask, contours must enclose the blob's *area*. Canny would trace its
+    # rim as a thin ring instead, and a min_area anywhere near the blob's own
+    # size would then throw the blob away.
+    blob = np.zeros((64, 96), np.uint8)
+    blob[10:50, 20:70] = 255  # 40 x 50 = 2000 px
+    kept = find_contours(blob, replace(base, min_area=1500, blur_kernel=0), binary=True)
+    assert len(kept) == 1, f"the mask blob should survive a 1500 px filter, got {len(kept)}"
+    assert cv2.contourArea(kept[0]) > 1500
 
     # Background subtraction needs a few frames before it reports anything sane;
     # what matters here is that every model builds and both view modes come back.

@@ -79,7 +79,15 @@ class Section(QGroupBox):
     Subclasses build their widgets with `self.knob(...)`, `self.combo(...)` and
     `self.check(...)`, which create the widget, stack it in the section's layout
     and wire its change signal to `changed` — so no subclass ever has to remember
-    the connection step. They then implement `values()`.
+    the connection step.
+
+    Each factory also takes the `Settings` field it feeds. That one extra argument
+    is what lets this class generate `values()` *and* its inverse `restore()` for
+    every section, instead of each one hand-writing two mirror-image mappings that
+    drift apart the first time a knob is added to only one of them.
+
+    `cast`/`back` convert between the widget's natural type and the field's, in
+    that order — `cast` on the way out, `back` on the way in.
     """
 
     changed = pyqtSignal()
@@ -87,25 +95,26 @@ class Section(QGroupBox):
     def __init__(self, title: str):
         super().__init__(title)
         self._column = QVBoxLayout(self)
+        self._fields: dict[str, tuple] = {}  # field -> (widget, kind, cast, back)
 
     # --- widget factories ---------------------------------------------------
 
-    def knob(self, *args, **kwargs) -> Knob:
-        widget = Knob(*args, **kwargs)
+    def knob(self, name: str, *args, field: str = "", cast=None, **kwargs) -> Knob:
+        widget = Knob(name, *args, **kwargs)
         widget.slider.valueChanged.connect(self.changed)
-        return self._add(widget)
+        return self._add(widget, field, "knob", cast)
 
-    def combo(self, items) -> QComboBox:
+    def combo(self, items, field: str = "", cast=None, back=None) -> QComboBox:
         widget = QComboBox()
         widget.addItems(items)
         widget.currentIndexChanged.connect(self.changed)
-        return self._add(widget)
+        return self._add(widget, field, "combo", cast, back)
 
-    def check(self, text: str, checked: bool = False) -> QCheckBox:
+    def check(self, text: str, checked: bool = False, field: str = "") -> QCheckBox:
         widget = QCheckBox(text)
         widget.setChecked(checked)
         widget.toggled.connect(self.changed)
-        return self._add(widget)
+        return self._add(widget, field, "check")
 
     def button(self, text: str, slot) -> QPushButton:
         """An action button. Its slot is its own — it does not report `changed`."""
@@ -119,12 +128,47 @@ class Section(QGroupBox):
         widget.setWordWrap(True)
         return self._add(widget)
 
-    def _add(self, widget):
+    def _add(self, widget, field: str = "", kind: str = "", cast=None, back=None):
         self._column.addWidget(widget)
+        if field:
+            self._fields[field] = (widget, kind, cast, back)
         return widget
 
-    # --- contract -----------------------------------------------------------
+    # --- the contract with MainWindow ---------------------------------------
 
     def values(self) -> dict:
-        """The section's knobs as `Settings` field names -> values."""
-        raise NotImplementedError
+        """The section's controls as `Settings` field names -> values."""
+        out = {}
+        for field, (widget, kind, cast, _) in self._fields.items():
+            raw = (
+                widget.value()
+                if kind == "knob"
+                else widget.isChecked()
+                if kind == "check"
+                else widget.currentText()
+            )
+            out[field] = cast(raw) if cast else raw
+        return out
+
+    def restore(self, data: dict) -> None:
+        """Put saved values back into the widgets. Unknown fields are ignored.
+
+        Signals stay blocked throughout: restoring twenty controls one at a time
+        would otherwise fire twenty settings rebuilds, and any field the saved
+        file does not carry keeps the widget's own default.
+        """
+        blocked = self.signalsBlocked()
+        self.blockSignals(True)
+        try:
+            for field, (widget, kind, _, back) in self._fields.items():
+                if field not in data:
+                    continue
+                value = back(data[field]) if back else data[field]
+                if kind == "knob":
+                    widget.set_value(float(value))
+                elif kind == "check":
+                    widget.setChecked(bool(value))
+                else:
+                    widget.setCurrentText(str(value))
+        finally:
+            self.blockSignals(blocked)

@@ -24,6 +24,8 @@ def pick_video() -> str:
 def main() -> int:
     # QApplication must exist before any widget, including the file dialog.
     app = QApplication(sys.argv)
+    # Names the per-platform config directory the panel's settings cache lives in.
+    app.setApplicationName("video-tuner")
 
     path = sys.argv[1] if len(sys.argv) > 1 else pick_video()
     if not path:

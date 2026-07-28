@@ -12,7 +12,11 @@ Every section reports through the same `changed` signal into `push_settings()`,
 so adding a control never means adding a connection here.
 """
 
-from PyQt6.QtCore import Qt
+import json
+from dataclasses import asdict
+from pathlib import Path
+
+from PyQt6.QtCore import QStandardPaths, Qt
 from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -34,6 +38,41 @@ from .controls import BackgroundSection, BasicSection, ContourSection
 PANEL_WIDTH = 380
 
 
+def cache_file() -> Path:
+    """Where the panel's state lives between runs.
+
+    Qt already knows the per-platform config directory, so there is no path to
+    hard-code and nothing to get wrong on Windows — ~/.config/video-tuner on
+    Linux, ~/Library/Preferences/video-tuner on macOS.
+    """
+    root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
+    return Path(root) / "settings.json"
+
+
+def load_cached() -> dict:
+    """The last session's settings, or an empty dict if there is no usable file.
+
+    Never raises. A missing, unreadable or half-written cache is not worth
+    refusing to start over — the sections fall back to their own defaults, and
+    the next quit overwrites it.
+    """
+    try:
+        data = json.loads(cache_file().read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_cached(settings) -> None:
+    """Write the settings back. Also never raises — this runs during shutdown."""
+    try:
+        path = cache_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(asdict(settings), indent=2) + "\n")
+    except OSError:
+        pass
+
+
 class MainWindow(QMainWindow):
     """One window, one video file, one worker thread."""
 
@@ -44,6 +83,11 @@ class MainWindow(QMainWindow):
         self.worker: VideoThread | None = None  # set at the end of __init__
 
         self.sections = (BasicSection(), ContourSection(), BackgroundSection())
+        # Pick up where the last session left off. Fields the file does not carry
+        # keep the widget defaults, so an old cache survives a new knob.
+        cached = load_cached()
+        for section in self.sections:
+            section.restore(cached)
         self.settings = self._collect()
 
         central = QWidget()
@@ -193,6 +237,7 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.stop()
             self.worker = None
+        save_cached(self.settings)
         super().closeEvent(event)
 
 

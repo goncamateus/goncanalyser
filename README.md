@@ -29,8 +29,20 @@ processing/
 
     raw frame -> adjustments -> background subtraction -> contours -> colour space
 
-Detection runs on the adjusted frame, and the colour space conversion happens
-last, so switching to HSV changes what you see and never what was measured.
+Contours run *after* background subtraction and are traced on the motion mask
+itself, so the two view modes report the same regions and the Min area filter
+measures the moving blob. With subtraction off they fall back to Canny edges of
+the adjusted frame. The colour space conversion happens last, so switching to
+HSV changes what you see and never what was measured.
+
+## Settings cache
+
+The panel's state is written on quit and restored on the next launch, to the
+per-platform config directory Qt nominates (`~/Library/Preferences/video-tuner/`
+on macOS, `~/.config/video-tuner/` on Linux). Delete `settings.json` there to get
+the defaults back. A missing or corrupt file is ignored rather than fatal, and a
+cache written before a knob existed still loads — the missing field keeps its
+default.
 
 ## Background subtraction on a moving camera
 

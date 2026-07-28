@@ -8,21 +8,28 @@ class ContourSection(Section):
 
     def __init__(self):
         super().__init__("B · Contour Finding")
-        self.enabled = self.check("Draw contours")
+        self.enabled = self.check("Draw contours", field="contours_on")
         # Only odd kernels are legal; the pipeline rounds up, so the slider is
         # free to land anywhere including 0 (= no blur).
-        self.blur = self.knob("Blur kernel", 0, 31, 5, tip="0 or 1 = no blur; even values round up")
-        self.canny_lo = self.knob("Canny lower", 0, 500, 50, tip="edges below this are discarded")
-        self.canny_hi = self.knob("Canny upper", 0, 500, 150, tip="edges above this always kept")
-        self.min_area = self.knob("Min contour area", 0, 5000, 200, tip="in pixels of the frame")
-        self.note("Contours are found on whatever the stages above produced, so with "
-                  "background subtraction on they outline the moving regions.")
-
-    def values(self) -> dict:
-        return {
-            "contours_on": self.enabled.isChecked(),
-            "blur_kernel": int(self.blur.value()),
-            "canny_lo": int(self.canny_lo.value()),
-            "canny_hi": int(self.canny_hi.value()),
-            "min_area": int(self.min_area.value()),
-        }
+        self.blur = self.knob(
+            "Blur kernel", 0, 31, 5, tip="0 or 1 = no blur; even values round up",
+            field="blur_kernel", cast=int,
+        )
+        self.canny_lo = self.knob(
+            "Canny lower", 0, 500, 50, tip="edges below this are discarded",
+            field="canny_lo", cast=int,
+        )
+        self.canny_hi = self.knob(
+            "Canny upper", 0, 500, 150, tip="edges above this always kept",
+            field="canny_hi", cast=int,
+        )
+        self.min_area = self.knob(
+            "Min contour area", 0, 5000, 200, tip="in pixels of the frame",
+            field="min_area", cast=int,
+        )
+        self.note(
+            "Contours run <b>after</b> background subtraction. With it on they are "
+            "traced on the motion mask itself — blobs, not edges — so the Canny "
+            "sliders do nothing and Min area measures the moving region. With it off "
+            "they are Canny edges of the adjusted frame."
+        )
