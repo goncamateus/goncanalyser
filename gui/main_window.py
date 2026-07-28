@@ -82,7 +82,13 @@ class MainWindow(QMainWindow):
         self.path = path
         self.worker: VideoThread | None = None  # set at the end of __init__
 
-        self.sections = (BasicSection(), EdgeSection(), BackgroundSection())
+        # Panel order mirrors the frame chain: adjust, then subtract, then edges.
+        # Named, not indexed — the one thing wired to a specific section should
+        # not break the next time they are reordered.
+        self.basic = BasicSection()
+        self.background = BackgroundSection()
+        self.edges = EdgeSection()
+        self.sections = (self.basic, self.background, self.edges)
         # Pick up where the last session left off. Fields the file does not carry
         # keep the widget defaults, so an old cache survives a new knob.
         cached = load_cached()
@@ -101,7 +107,7 @@ class MainWindow(QMainWindow):
         # background section's own one-off action.
         for section in self.sections:
             section.changed.connect(self.push_settings)
-        self.sections[2].reset_requested.connect(self.reset_background)
+        self.background.reset_requested.connect(self.reset_background)
 
         for keys, slot in (
             ("Space", self.toggle_play),

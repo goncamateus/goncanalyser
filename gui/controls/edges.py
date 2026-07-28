@@ -1,4 +1,4 @@
-"""Section B — edge detection: blur, then the two Canny thresholds."""
+"""Section C — edge detection: blur, then the two Canny thresholds."""
 
 from .base import Section
 
@@ -9,7 +9,7 @@ class EdgeSection(Section):
     """Toggle plus the three knobs that decide which edges survive."""
 
     def __init__(self):
-        super().__init__("B · Edge Detection")
+        super().__init__("C · Edge Detection")
         self.enabled = self.check("Detect edges", field="edges_on")
         # Only odd kernels are legal; the pipeline rounds up, so the slider is
         # free to land anywhere including 0 (= no blur).

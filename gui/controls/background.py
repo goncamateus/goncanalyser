@@ -1,4 +1,4 @@
-"""Section C — background subtraction: model choice, its knobs, and the view mode."""
+"""Section B — background subtraction: model choice, its knobs, and the view mode."""
 
 from PyQt6.QtCore import pyqtSignal
 
@@ -24,7 +24,7 @@ class BackgroundSection(Section):
     reset_requested = pyqtSignal()
 
     def __init__(self):
-        super().__init__("C · Background Subtraction")
+        super().__init__("B · Background Subtraction")
         self.enabled = self.check("Enable background subtraction", field="bgsub_on")
         self.model = self.combo(BG_MODELS, field="bg_model")
         self.history = self.knob(

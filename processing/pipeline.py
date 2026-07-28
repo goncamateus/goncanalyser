@@ -62,14 +62,7 @@ class Settings:
     blur: int = 0  # Gaussian denoise kernel; 0 or 1 = off
     color_space: str = "Default (BGR)"  # key into COLOR_SPACES
 
-    # --- Section B: edge detection ---
-    edges_on: bool = False
-    blur_kernel: int = 5  # Gaussian kernel; forced odd and >= 1 before use
-    canny_lo: int = 50
-    canny_hi: int = 150
-    edges_only: bool = False  # True = show the raw edge map, False = overlay it
-
-    # --- Section C: background subtraction ---
+    # --- Section B: background subtraction ---
     bgsub_on: bool = False
     bg_model: str = "MOG2"  # key into BG_MODELS
     history: int = 500  # frames the model remembers (the SGM's age cap)
@@ -82,6 +75,13 @@ class Settings:
     block: int = 4  # model resolution: one Gaussian per block x block pixels
     edge_tolerance: float = 1.5  # px of parallax slack, charged per unit of gradient
     min_age: int = 10  # frames a cell must be modelled before it may report
+
+    # --- Section C: edge detection ---
+    edges_on: bool = False
+    blur_kernel: int = 5  # Gaussian kernel; forced odd and >= 1 before use
+    canny_lo: int = 50
+    canny_hi: int = 150
+    edges_only: bool = False  # True = show the raw edge map, False = overlay it
 
 
 @lru_cache(maxsize=64)

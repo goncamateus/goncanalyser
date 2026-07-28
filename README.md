@@ -17,8 +17,8 @@ gui/
   controls/
     base.py                 Knob (slider + readout) and the Section base class
     basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
-    edges.py                B: blur, Canny lower/upper
-    background.py           C: model choice, history, varThreshold, learning rate
+    background.py           B: model choice, history, varThreshold, learning rate
+    edges.py                C: blur, Canny lower/upper
 processing/
   video_thread.py           QThread: decode, process, emit QImages
   pipeline.py               the OpenCV chain -- no Qt, importable on its own
