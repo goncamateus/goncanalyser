@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QGridLayout,
-    QGroupBox,
     QLabel,
     QPushButton,
     QSlider,
@@ -73,7 +72,19 @@ class Knob(QWidget):
         self.slider.setValue(int(round(value * self.scale)))
 
 
-class Section(QGroupBox):
+HEADER_STYLE = """
+QPushButton {
+    text-align: left;
+    padding: 7px 8px;
+    border: none;
+    font-weight: bold;
+    background: rgba(128, 128, 128, 0.16);
+}
+QPushButton:hover { background: rgba(128, 128, 128, 0.30); }
+"""
+
+
+class Section(QWidget):
     """A titled group of controls that reports one `changed` signal for all of them.
 
     Subclasses build their widgets with `self.knob(...)`, `self.combo(...)` and
@@ -93,38 +104,42 @@ class Section(QGroupBox):
     changed = pyqtSignal()
 
     def __init__(self, title: str):
-        super().__init__(title)
-        self._column = QVBoxLayout(self)
+        super().__init__()
+        self._title = title
         self._fields: dict[str, tuple] = {}  # field -> (widget, kind, cast, back)
 
-        # A checkable QGroupBox already draws a toggle in its header and already
-        # handles the click — all that is missing is hiding the contents, which
-        # is what turns "disabled" into "collapsed". No custom header widget, no
-        # animation, no third-party collapsible box.
-        self.setCheckable(True)
-        self.setChecked(True)
-        self._margins = self._column.contentsMargins()
-        self._spacing = self._column.spacing()
-        self.toggled.connect(self._collapse)
+        # A header bar with a disclosure triangle, not a checkbox: a checkbox in
+        # a group header reads as "switch this feature off", which is a different
+        # thing from folding the panel away — and several sections have a real
+        # enable checkbox of their own inside them.
+        self._header = QPushButton()
+        self._header.setCheckable(True)
+        self._header.setChecked(True)
+        self._header.setStyleSheet(HEADER_STYLE)
+        self._header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header.toggled.connect(self._collapse)
+
+        # Everything the factories add goes in the body, so collapsing is one
+        # setVisible on one widget rather than a walk over the children.
+        self._body = QWidget()
+        self._column = QVBoxLayout(self._body)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._header)
+        outer.addWidget(self._body)
+        self._collapse(True)
 
     def _collapse(self, expanded: bool) -> None:
-        for i in range(self._column.count()):
-            widget = self._column.itemAt(i).widget()
-            if widget is not None:
-                widget.setVisible(expanded)
-        # Hiding the children is not enough on its own: the layout's own margins
-        # and spacing still reserve a blank strip under the header. Zero them
-        # while collapsed so the section really is just its title bar.
-        if expanded:
-            self._column.setContentsMargins(self._margins)
-            self._column.setSpacing(self._spacing)
-        else:
-            self._column.setContentsMargins(0, 0, 0, 0)
-            self._column.setSpacing(0)
-        # ponytail: a collapsed section is still ~30 px, not 0 — the QGroupBox
-        # frame itself. Removing that needs a stylesheet swap; not worth it until
-        # someone is actually short of panel height.
-        self.adjustSize()
+        self._body.setVisible(expanded)
+        self._header.setText(f"{'▾' if expanded else '▸'}   {self._title}")
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._header.setChecked(expanded)
+
+    def is_expanded(self) -> bool:
+        return self._header.isChecked()
 
     # --- widget factories ---------------------------------------------------
 
