@@ -88,6 +88,9 @@ class BackgroundSection(Section):
             self.min_age,
         )
         self.model.currentIndexChanged.connect(self._sync_enabled)
+        # Expanding a checkable QGroupBox re-enables every child it disabled on
+        # collapse, which would undo the greying-out below. Re-apply it after.
+        self.toggled.connect(lambda _: self._sync_enabled())
         self._sync_enabled()
 
     def _sync_enabled(self) -> None:

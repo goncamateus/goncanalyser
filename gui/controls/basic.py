@@ -25,5 +25,12 @@ class BasicSection(Section):
             "Gamma", 0.1, 3.0, 1.0, 100, "<1 darkens, >1 lifts shadows", field="gamma"
         )
 
+        # 0 is off. Unlike the four above, this one is not purely cosmetic: the
+        # contour and background stages read the frame it produces.
+        self.blur = self.knob(
+            "Blur (denoise)", 0, 31, 0, tip="0 or 1 = off; even values round up",
+            field="blur", cast=int,
+        )
+
         self.space = self.combo(COLOR_SPACES.keys(), field="color_space")
         self.note("HSV and LAB are drawn as raw channels, i.e. false colour.")

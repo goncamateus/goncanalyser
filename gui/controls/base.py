@@ -97,6 +97,35 @@ class Section(QGroupBox):
         self._column = QVBoxLayout(self)
         self._fields: dict[str, tuple] = {}  # field -> (widget, kind, cast, back)
 
+        # A checkable QGroupBox already draws a toggle in its header and already
+        # handles the click — all that is missing is hiding the contents, which
+        # is what turns "disabled" into "collapsed". No custom header widget, no
+        # animation, no third-party collapsible box.
+        self.setCheckable(True)
+        self.setChecked(True)
+        self._margins = self._column.contentsMargins()
+        self._spacing = self._column.spacing()
+        self.toggled.connect(self._collapse)
+
+    def _collapse(self, expanded: bool) -> None:
+        for i in range(self._column.count()):
+            widget = self._column.itemAt(i).widget()
+            if widget is not None:
+                widget.setVisible(expanded)
+        # Hiding the children is not enough on its own: the layout's own margins
+        # and spacing still reserve a blank strip under the header. Zero them
+        # while collapsed so the section really is just its title bar.
+        if expanded:
+            self._column.setContentsMargins(self._margins)
+            self._column.setSpacing(self._spacing)
+        else:
+            self._column.setContentsMargins(0, 0, 0, 0)
+            self._column.setSpacing(0)
+        # ponytail: a collapsed section is still ~30 px, not 0 — the QGroupBox
+        # frame itself. Removing that needs a stylesheet swap; not worth it until
+        # someone is actually short of panel height.
+        self.adjustSize()
+
     # --- widget factories ---------------------------------------------------
 
     def knob(self, name: str, *args, field: str = "", cast=None, **kwargs) -> Knob:

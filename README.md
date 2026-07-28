@@ -16,7 +16,7 @@ gui/
   main_window.py            layout, transport, panel <-> worker wiring
   controls/
     base.py                 Knob (slider + readout) and the Section base class
-    basic.py                A: brightness / contrast / saturation / gamma / colour space
+    basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
     contours.py             B: blur, Canny thresholds, min area
     background.py           C: model choice, history, varThreshold, learning rate
 processing/

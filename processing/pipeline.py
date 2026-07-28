@@ -59,6 +59,7 @@ class Settings:
     contrast: float = 1.0  # multiplicative gain, 1.0 = identity
     saturation: float = 1.0  # HSV S channel gain, 1.0 = identity
     gamma: float = 1.0  # 1.0 = identity, <1 darkens, >1 brightens
+    blur: int = 0  # Gaussian denoise kernel; 0 or 1 = off
     color_space: str = "Default (BGR)"  # key into COLOR_SPACES
 
     # --- Section B: contour finding ---
@@ -90,11 +91,16 @@ def gamma_lut(gamma: float) -> np.ndarray:
 
 
 def adjust(bgr: np.ndarray, s: Settings) -> np.ndarray:
-    """Brightness, contrast, saturation and gamma.
+    """Brightness, contrast, saturation, gamma and a denoise blur.
 
     Each stage is skipped when its knob sits at identity, so an untouched panel
     costs nothing per frame. Nothing is written in place — the caller's frame may
     be reused (e.g. re-rendered while paused), so it must stay pristine.
+
+    The blur is last and it is not cosmetic: everything downstream reads this
+    frame, so it is the one knob here that quiets sensor noise for the detectors
+    rather than only for your eyes. It is a different kernel from the contour
+    section's, which blurs again just before edge detection.
     """
     out = bgr
     if s.contrast != 1.0 or s.brightness:
@@ -109,6 +115,9 @@ def adjust(bgr: np.ndarray, s: Settings) -> np.ndarray:
         )
     if s.gamma != 1.0:
         out = cv2.LUT(out, gamma_lut(s.gamma))
+    k = odd_kernel(s.blur)
+    if k > 1:
+        out = cv2.GaussianBlur(out, (k, k), 0)
     return out
 
 
@@ -323,6 +332,12 @@ def _demo() -> None:
 
     tuned = replace(base, brightness=20, contrast=1.5, saturation=1.2, gamma=0.8)
     assert pipe.process(frame, tuned)[0].shape == frame.shape
+
+    # Blur off means *off*, not a 1x1 kernel copy — the identity check above is
+    # what the paused-frame cache relies on.
+    assert (pipe.process(frame, replace(base, blur=1))[0] == frame).all()
+    smoothed = pipe.process(frame, replace(base, blur=5))[0]
+    assert smoothed.shape == frame.shape and not (smoothed == frame).all()
 
     for name in COLOR_SPACES:
         out, _ = pipe.process(frame, replace(base, color_space=name))
