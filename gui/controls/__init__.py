@@ -2,6 +2,6 @@
 
 from .background import BackgroundSection
 from .basic import BasicSection
-from .contours import ContourSection
+from .edges import EdgeSection
 
-__all__ = ["BackgroundSection", "BasicSection", "ContourSection"]
+__all__ = ["BackgroundSection", "BasicSection", "EdgeSection"]

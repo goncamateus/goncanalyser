@@ -26,7 +26,7 @@ class BasicSection(Section):
         )
 
         # 0 is off. Unlike the four above, this one is not purely cosmetic: the
-        # contour and background stages read the frame it produces.
+        # edge and background stages read the frame it produces.
         self.blur = self.knob(
             "Blur (denoise)", 0, 31, 0, tip="0 or 1 = off; even values round up",
             field="blur", cast=int,

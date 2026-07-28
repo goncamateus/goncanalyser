@@ -17,7 +17,7 @@ gui/
   controls/
     base.py                 Knob (slider + readout) and the Section base class
     basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
-    contours.py             B: blur, Canny thresholds, min area
+    edges.py                B: blur, Canny lower/upper
     background.py           C: model choice, history, varThreshold, learning rate
 processing/
   video_thread.py           QThread: decode, process, emit QImages
@@ -27,13 +27,13 @@ processing/
 
 ## Frame chain
 
-    raw frame -> adjustments -> background subtraction -> contours -> colour space
+    raw frame -> adjustments -> background subtraction -> edges -> colour space
 
-Contours run *after* background subtraction and are traced on the motion mask
-itself, so the two view modes report the same regions and the Min area filter
-measures the moving blob. With subtraction off they fall back to Canny edges of
-the adjusted frame. The colour space conversion happens last, so switching to
-HSV changes what you see and never what was measured.
+Edge detection runs *after* background subtraction and reads the motion mask
+itself, so with subtraction on you get the outline of what moved rather than the
+edges of a colour cut-out. With it off, the edges of the adjusted frame. The
+colour space conversion happens last, so switching to HSV changes what you see
+and never what was measured.
 
 ## Settings cache
 

@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 from processing.pipeline import Settings
 from processing.video_thread import VideoThread
 
-from .controls import BackgroundSection, BasicSection, ContourSection
+from .controls import BackgroundSection, BasicSection, EdgeSection
 
 PANEL_WIDTH = 380
 
@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         self.path = path
         self.worker: VideoThread | None = None  # set at the end of __init__
 
-        self.sections = (BasicSection(), ContourSection(), BackgroundSection())
+        self.sections = (BasicSection(), EdgeSection(), BackgroundSection())
         # Pick up where the last session left off. Fields the file does not carry
         # keep the widget defaults, so an old cache survives a new knob.
         cached = load_cached()

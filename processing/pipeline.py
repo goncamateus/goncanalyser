@@ -11,11 +11,11 @@ The GUI describes what it wants with a single frozen `Settings` bundle and calls
 Processing order for one frame:
 
     raw BGR frame
-      -> basic adjustments (brightness / contrast / saturation / gamma)
+      -> basic adjustments (brightness / contrast / saturation / gamma / blur)
       -> background subtraction (optional; replaces the frame with the motion
          mask, or with the colour frame masked down to the moving pixels)
-      -> contour finding (optional; detected on whatever the previous stage
-         produced, drawn on top so the outlines survive)
+      -> edge detection (optional; run on whatever the previous stage produced,
+         painted on top or shown on its own)
       -> colour space view (last, so it never changes what the detectors saw)
 """
 
@@ -36,7 +36,7 @@ COLOR_SPACES: dict[str, int | None] = {
     "LAB": cv2.COLOR_BGR2LAB,
 }
 
-CONTOUR_COLOR = (0, 255, 255)  # BGR yellow — readable on both grey masks and colour frames
+EDGE_COLOR = (0, 255, 255)  # BGR yellow — readable on both grey masks and colour frames
 
 # Background subtraction models, in the order the GUI lists them. The first two
 # assume the camera is bolted down; only the third survives a moving one.
@@ -62,12 +62,12 @@ class Settings:
     blur: int = 0  # Gaussian denoise kernel; 0 or 1 = off
     color_space: str = "Default (BGR)"  # key into COLOR_SPACES
 
-    # --- Section B: contour finding ---
-    contours_on: bool = False
+    # --- Section B: edge detection ---
+    edges_on: bool = False
     blur_kernel: int = 5  # Gaussian kernel; forced odd and >= 1 before use
     canny_lo: int = 50
     canny_hi: int = 150
-    min_area: int = 200  # contours smaller than this are dropped
+    edges_only: bool = False  # True = show the raw edge map, False = overlay it
 
     # --- Section C: background subtraction ---
     bgsub_on: bool = False
@@ -99,7 +99,7 @@ def adjust(bgr: np.ndarray, s: Settings) -> np.ndarray:
 
     The blur is last and it is not cosmetic: everything downstream reads this
     frame, so it is the one knob here that quiets sensor noise for the detectors
-    rather than only for your eyes. It is a different kernel from the contour
+    rather than only for your eyes. It is a different kernel from the edge
     section's, which blurs again just before edge detection.
     """
     out = bgr
@@ -146,37 +146,33 @@ def odd_kernel(size: int) -> int:
     return size if size % 2 else size + 1
 
 
-def find_contours(img: np.ndarray, s: Settings, binary: bool = False) -> list[np.ndarray]:
-    """Blur -> edges (or blobs) -> external contours -> drop those under `min_area`.
+def find_edges(img: np.ndarray, s: Settings) -> np.ndarray:
+    """Blur, then Canny. Returns the edge map (uint8, 0 or 255).
 
-    `binary=True` says the input is already a foreground mask, so the blobs *are*
-    the regions and Canny must be skipped. Running Canny on a mask would trace
-    each blob's rim as a thin closed ring, and `min_area` would then measure the
-    area of that ring rather than of the region — a large blob with a two-pixel
-    rim reads as tiny and gets filtered out. Blurring still helps: blur plus
-    re-threshold is a cheap despeckle.
+    The blur is what makes the thresholds mean anything: Canny differentiates,
+    and differentiating raw sensor noise produces edges everywhere. Kernel and
+    both thresholds are the section's three knobs.
 
-    Only the outermost contours are kept: a region with a hole in it is still one
-    region, and the hole is rarely what you are counting.
+    Works on a colour frame or on a single-channel mask. On a mask the result is
+    each blob's rim, which is the useful thing to look at when the previous stage
+    was background subtraction.
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     k = odd_kernel(s.blur_kernel)
     if k > 1:
         gray = cv2.GaussianBlur(gray, (k, k), 0)
-    if binary:
-        _, edges = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-    else:
-        edges = cv2.Canny(gray, s.canny_lo, s.canny_hi)
-    found, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return [c for c in found if cv2.contourArea(c) >= s.min_area]
+    return cv2.Canny(gray, s.canny_lo, s.canny_hi)
 
 
-def draw_contours(bgr: np.ndarray, contours: list[np.ndarray]) -> np.ndarray:
-    """Outlines drawn onto a copy — never into a frame someone else may reuse."""
-    if not contours:
-        return bgr
+def draw_edges(bgr: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Edges painted onto a copy — never into a frame someone else may reuse.
+
+    Boolean indexing rather than `drawContours`: there are no contours here, just
+    a pixel map, and painting it directly keeps every single-pixel edge Canny
+    found instead of only the ones that close into a loop.
+    """
     out = bgr.copy()
-    cv2.drawContours(out, contours, -1, CONTOUR_COLOR, 2)
+    out[edges > 0] = EDGE_COLOR
     return out
 
 
@@ -267,7 +263,7 @@ class BackgroundModel:
     def apply(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, np.ndarray, str]:
         """(what to display, the raw mask, a note).
 
-        The mask comes back alongside the rendering because the contour stage
+        The mask comes back alongside the rendering because the edge stage
         wants the blobs themselves, not whatever the view mode chose to paint.
         """
         self._ensure(s)
@@ -304,13 +300,15 @@ class Pipeline:
         if s.bgsub_on:
             frame, mask, note = self.background.apply(frame, s)
 
-        if s.contours_on:
-            # Trace the mask, not the rendering. In the Foreground view the frame
-            # is a colour cut-out, and Canny on that finds the cut-out's border
+        if s.edges_on:
+            # Read the mask, not the rendering. In the Foreground view the frame
+            # is a colour cut-out, so Canny on it would find the cut-out's border
             # and every bit of texture inside it rather than the moving regions.
-            contours = find_contours(mask if mask is not None else frame, s, binary=mask is not None)
-            frame = draw_contours(frame, contours)
-            note += f" contours={len(contours)}"
+            edges = find_edges(mask if mask is not None else frame, s)
+            frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR) if s.edges_only else draw_edges(
+                frame, edges
+            )
+            note += f" edges={(edges > 0).mean():.1%}"
 
         # Last, so the colour space view is purely cosmetic and never feeds back
         # into what the detectors above measured.
@@ -345,17 +343,20 @@ def _demo() -> None:
 
     # A zero kernel used to crash GaussianBlur; the clamp is what stops it.
     assert odd_kernel(0) == 1 and odd_kernel(4) == 5
-    _, note = pipe.process(frame, replace(base, contours_on=True, blur_kernel=0, min_area=1))
-    assert "contours=" in note and "contours=0" not in note, note
+    edged, note = pipe.process(frame, replace(base, edges_on=True, blur_kernel=0))
+    assert "edges=" in note and "edges=0.0%" not in note, note
+    assert (edged == EDGE_COLOR).all(axis=2).any(), "the overlay must paint something"
 
-    # On a mask, contours must enclose the blob's *area*. Canny would trace its
-    # rim as a thin ring instead, and a min_area anywhere near the blob's own
-    # size would then throw the blob away.
+    # Edges-only replaces the picture rather than painting over it.
+    only, _ = pipe.process(frame, replace(base, edges_on=True, edges_only=True))
+    assert set(np.unique(only)) <= {0, 255}, "the edge map view must stay binary"
+
+    # A mask arrives single-channel: Canny must trace the blob's rim, not crash.
     blob = np.zeros((64, 96), np.uint8)
-    blob[10:50, 20:70] = 255  # 40 x 50 = 2000 px
-    kept = find_contours(blob, replace(base, min_area=1500, blur_kernel=0), binary=True)
-    assert len(kept) == 1, f"the mask blob should survive a 1500 px filter, got {len(kept)}"
-    assert cv2.contourArea(kept[0]) > 1500
+    blob[10:50, 20:70] = 255
+    rim = find_edges(blob, replace(base, blur_kernel=0))
+    assert rim[10, 20:70].any(), "the blob's top edge should be found"
+    assert not rim[30, 45], "the blob's interior is flat, so it is not an edge"
 
     # Background subtraction needs a few frames before it reports anything sane;
     # what matters here is that every model builds and both view modes come back.
