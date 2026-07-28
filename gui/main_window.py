@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
 from processing.pipeline import Settings
 from processing.video_thread import VideoThread
 
-from .controls import BackgroundSection, BasicSection
+from .controls import BasicSection, PlumeSection
 
 PANEL_WIDTH = 380
 
@@ -82,12 +82,10 @@ class MainWindow(QMainWindow):
         self.path = path
         self.worker: VideoThread | None = None  # set at the end of __init__
 
-        # Panel order mirrors the frame chain: adjust, then subtract. Named, not
-        # indexed — the one thing wired to a specific section should not break
-        # the next time they are reordered.
+        # Panel order mirrors the frame chain: adjust, then detect.
         self.basic = BasicSection()
-        self.background = BackgroundSection()
-        self.sections = (self.basic, self.background)
+        self.plume = PlumeSection()
+        self.sections = (self.basic, self.plume)
         # Pick up where the last session left off. Fields the file does not carry
         # keep the widget defaults, so an old cache survives a new knob.
         cached = load_cached()
@@ -102,11 +100,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.statusBar().showMessage("starting…")
 
-        # Wire every section to the one method that rebuilds Settings, plus the
-        # background section's own one-off action.
+        # Every section routes to the one method that rebuilds Settings.
         for section in self.sections:
             section.changed.connect(self.push_settings)
-        self.background.reset_requested.connect(self.reset_background)
 
         for keys, slot in (
             ("Space", self.toggle_play),
@@ -120,7 +116,7 @@ class MainWindow(QMainWindow):
     # --- layout -------------------------------------------------------------
 
     def _panel(self) -> QWidget:
-        """The three sections stacked in a scroll area, fixed width on the left."""
+        """The sections stacked in a scroll area, fixed width on the left."""
         inner = QWidget()
         column = QVBoxLayout(inner)
         for section in self.sections:
@@ -171,7 +167,7 @@ class MainWindow(QMainWindow):
     # --- settings -----------------------------------------------------------
 
     def _collect(self) -> Settings:
-        """Merge the three sections' dicts into one immutable Settings."""
+        """Merge the sections' dicts into one immutable Settings."""
         merged: dict = {}
         for section in self.sections:
             merged.update(section.values())
@@ -194,10 +190,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self.statusBar().showMessage)
         worker.start()
         return worker
-
-    def reset_background(self) -> None:
-        if self.worker:
-            self.worker.reset_background()
 
     # --- transport ----------------------------------------------------------
 

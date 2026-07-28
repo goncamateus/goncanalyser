@@ -12,18 +12,18 @@ Processing order for one frame:
 
     raw BGR frame
       -> basic adjustments (brightness / contrast / saturation / gamma / blur)
-      -> background subtraction (optional; replaces the frame with the motion
-         mask, or with the colour frame masked down to the moving pixels)
-      -> colour space view (last, so it never changes what the model saw)
+      -> plume detection (optional; outlines the plume, or shows the temperature
+         index the thresholds are actually measuring)
+      -> colour space view (last, so it never changes what the detector saw)
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from functools import lru_cache
 
 import cv2
 import numpy as np
 
-from .motion import CompensatedSGM, GlobalMotion
+from . import plume
 
 # Label -> OpenCV conversion code. `None` means "leave it as BGR".
 # Order matters: the GUI combo box is built from these keys.
@@ -34,10 +34,10 @@ COLOR_SPACES: dict[str, int | None] = {
     "LAB": cv2.COLOR_BGR2LAB,
 }
 
-# Background subtraction models, in the order the GUI lists them. The first two
-# assume the camera is bolted down; only the third survives a moving one.
-BG_MODELS = ("MOG2", "KNN", "Compensated (moving camera)")
-COMPENSATED = BG_MODELS[2]
+# What the plume section paints. "Outline" keeps the footage visible underneath,
+# which is what you want while dragging a slider; the other two show the detector
+# its own inputs and outputs.
+PLUME_VIEWS = ("Outline", "Mask", "Temperature index")
 
 
 @dataclass(frozen=True)
@@ -58,19 +58,25 @@ class Settings:
     blur: int = 0  # Gaussian denoise kernel; 0 or 1 = off
     color_space: str = "Default (BGR)"  # key into COLOR_SPACES
 
-    # --- Section B: background subtraction ---
-    bgsub_on: bool = False
-    bg_model: str = "MOG2"  # key into BG_MODELS
-    history: int = 500  # frames the model remembers (the SGM's age cap)
-    var_threshold: float = 16.0  # MOG2 varThreshold / KNN dist2Threshold / SGM theta^2
-    learning_rate: float = -1.0  # passed to .apply(); -1 = let the model decide
-    mask_only: bool = True  # True = show the B/W motion mask, False = foreground
-    # Compensated model only — ignored by MOG2 and KNN.
-    gmc_method: str = "flow"  # how camera motion is estimated; see motion.GMC_METHODS
-    gmc_homography: bool = False  # False = 4-dof similarity, True = full homography
-    block: int = 4  # model resolution: one Gaussian per block x block pixels
-    edge_tolerance: float = 1.5  # px of parallax slack, charged per unit of gradient
-    min_age: int = 10  # frames a cell must be modelled before it may report
+    # --- Section B: plume detection ---
+    # The detector's own knobs live in plume.PlumeConfig; these mirror it field
+    # for field, so `plume_config()` below can build one straight from a Settings.
+    plume_on: bool = False
+    plume_view: str = "Outline"  # key into PLUME_VIEWS
+    plume_boxes: bool = True  # draw each source's search region
+    p_src: float = 99.0
+    sd_min: float = 20.0
+    src_close_k: int = 7
+    src_min_area: int = 120
+    p_hi: float = 99.0
+    p_lo: float = 90.0
+    sd_plume: float = 8.0
+    open_k: int = 3
+    close_k: int = 7
+    min_area: int = 200
+    grow_hot: int = 30
+    grow_warm: int = 8
+    roi_margin: int = 20
 
 
 @lru_cache(maxsize=64)
@@ -134,131 +140,50 @@ def odd_kernel(size: int) -> int:
     return size if size % 2 else size + 1
 
 
-class BackgroundModel:
-    """Whichever subtractor the settings ask for, rebuilt when its knobs change.
+def plume_config(s: Settings) -> plume.PlumeConfig:
+    """The detector's config, pulled out of Settings by matching field names.
 
-    Every model here takes `history` and `var_threshold` at construction time
-    only, so this tracks the values it was built with and transparently
-    re-creates the model when the GUI moves a slider. That resets the learned
-    background, which is the honest behaviour: the old model was trained under
-    settings the user just rejected.
-
-    MOG2 and KNN model a fixed pixel grid. The compensated model estimates the
-    camera motion and warps its own model to follow it — see `motion.py` for why
-    that is the only one of the three that works on drone footage.
+    Settings mirrors PlumeConfig field for field, so copying by name means adding
+    a knob touches the dataclass and the GUI section — never this function.
     """
-
-    def __init__(self) -> None:
-        self._sub = None
-        self._gmc: GlobalMotion | None = None
-        self._prev_gray: np.ndarray | None = None
-        self._built_with: tuple | None = None
-
-    def reset(self) -> None:
-        """Forget the learned background; it re-seeds from the next frame on."""
-        self._sub = None
-        self._gmc = None
-        self._prev_gray = None
-        self._built_with = None
-
-    def _ensure(self, s: Settings) -> None:
-        signature = (
-            s.bg_model,
-            int(s.history),
-            float(s.var_threshold),
-            # The rest only exist on the compensated model; including them
-            # unconditionally is harmless and keeps the tuple flat.
-            s.gmc_method,
-            s.gmc_homography,
-            int(s.block),
-            float(s.edge_tolerance),
-            int(s.min_age),
-            float(s.learning_rate),
-        )
-        if self._sub is not None and self._built_with == signature:
-            return
-        self._built_with = signature
-        self._prev_gray = None
-
-        if s.bg_model == COMPENSATED:
-            self._gmc = GlobalMotion(method=s.gmc_method, homography=s.gmc_homography)
-            self._sub = CompensatedSGM(
-                block=s.block,
-                history=s.history,
-                var_threshold=s.var_threshold,
-                learning_rate=s.learning_rate,
-                edge_tolerance=s.edge_tolerance,
-                min_age=s.min_age,
-            )
-        elif s.bg_model == "KNN":
-            # KNN calls the same knob dist2Threshold — the distance at which a
-            # pixel counts as "not background". Same role, different name.
-            self._sub = cv2.createBackgroundSubtractorKNN(
-                history=int(s.history), dist2Threshold=float(s.var_threshold)
-            )
-        else:
-            self._sub = cv2.createBackgroundSubtractorMOG2(
-                history=int(s.history), varThreshold=float(s.var_threshold)
-            )
-
-    def _mask(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, str]:
-        """The raw foreground mask, plus a note for the status bar."""
-        if s.bg_model != COMPENSATED:
-            return self._sub.apply(bgr, learningRate=s.learning_rate), ""
-
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        warp, inliers = (
-            self._gmc.estimate(self._prev_gray, gray)
-            if self._prev_gray is not None
-            else (np.eye(3, dtype=np.float32), 0)
-        )
-        self._prev_gray = gray
-        # A failed estimate silently becomes an identity warp, which looks exactly
-        # like a broken model on screen. Say so instead.
-        note = f" gmc={inliers}in" if inliers else " gmc=NONE"
-        return self._sub.apply(gray, warp), note
-
-    def apply(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, str]:
-        """Motion mask (B/W) or the foreground (mask applied to the colour frame)."""
-        self._ensure(s)
-        mask, note = self._mask(bgr, s)
-        if s.mask_only:
-            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), note
-        # MOG2 marks shadows as 127 and they survive `bitwise_and`, which is what
-        # you want: a shadowed part of a moving object is still the moving object.
-        return cv2.bitwise_and(bgr, bgr, mask=mask), note
+    names = {f.name for f in fields(plume.PlumeConfig)}
+    return plume.PlumeConfig(**{n: getattr(s, n) for n in names})
 
 
 class Pipeline:
-    """The whole per-frame chain, plus the one piece of state it needs.
+    """The whole per-frame chain.
 
-    One instance lives on the worker thread. `process()` is the only entry point.
+    Stateless now that the background models are gone: the plume detector reads
+    one frame and holds nothing between calls, which is why seeking backwards is
+    instant and why a slider change re-renders the paused frame exactly.
     """
 
-    def __init__(self) -> None:
-        self.background = BackgroundModel()
-
-    def reset_background(self) -> None:
-        self.background.reset()
-
     def process(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, str]:
-        """Run the chain. Returns the displayable frame and a note for the status bar.
-
-        The note is a string rather than a count because the stages have
-        different things worth reporting — and a camera-motion estimate that
-        failed has to be visible, since it looks identical to a working one.
-        """
-        # Section A feeds the subtractor: brightness, contrast, gamma and the
-        # denoise blur all land before the background model ever sees a pixel, so
-        # tuning them up there is how you clean up what gets masked down here.
+        """Run the chain. Returns the displayable frame and a note for the status bar."""
+        # Section A feeds the detector: brightness, contrast, gamma and the blur
+        # all land before the temperature index is taken. That is also the catch —
+        # every threshold below is a percentile of this frame's histogram, so
+        # moving a Section A slider re-tunes the detector under you.
         frame = adjust(bgr, s)
 
         note = ""
-        if s.bgsub_on:
-            frame, note = self.background.apply(frame, s)
+        if s.plume_on:
+            temp = plume.temp_index(frame)
+            found = plume.plume_masks(temp, plume_config(s))
+            if s.plume_view == PLUME_VIEWS[1]:  # Mask
+                # Halo mid-grey, core white: one image showing both extents.
+                stack = sum((m for *_, m in found), np.zeros(temp.shape, np.uint8))
+                frame = cv2.cvtColor(np.clip(stack, 0, 2) * 127, cv2.COLOR_GRAY2BGR)
+            else:
+                if s.plume_view == PLUME_VIEWS[2]:  # Temperature index
+                    frame = plume.heatmap(temp)
+                frame = plume.annotate(frame, found, s.plume_boxes)
+            core = sum(int((m == 2).sum()) for *_, m in found)
+            halo = sum(int((m == 1).sum()) for *_, m in found)
+            note = f"  plumes={len(found)} core={core} halo={halo}"
 
         # Last, so the colour space view is purely cosmetic and never feeds back
-        # into what the model above measured.
+        # into what the detector above measured.
         return to_color_space(frame, s.color_space), note
 
 
@@ -291,24 +216,23 @@ def _demo() -> None:
     # A zero kernel used to crash GaussianBlur; the clamp is what stops it.
     assert odd_kernel(0) == 1 and odd_kernel(4) == 5
 
-    # Section A feeds the subtractor: what comes out of the Foreground view is
-    # the *adjusted* pixels behind the mask, never the raw ones. Comparing
-    # against adjust() directly is what pins that wiring down.
-    lit = replace(base, bgsub_on=True, mask_only=False, brightness=60, blur=5)
-    out = Pipeline().process(frame, lit)[0]
-    kept = out.any(axis=2)  # a fresh model calls everything foreground
-    assert kept.any(), "nothing survived the mask, so this proves nothing"
-    assert (out[kept] == adjust(frame, lit)[kept]).all(), "the model saw unadjusted pixels"
+    # Every plume knob must reach the detector. Copying by field name is silent
+    # when it misses, so check the two dataclasses still agree.
+    missing = {f.name for f in fields(plume.PlumeConfig)} - {f.name for f in fields(Settings)}
+    assert not missing, f"Settings is missing plume knobs: {missing}"
+    assert plume_config(replace(base, p_hi=97.5)).p_hi == 97.5
 
-    # Background subtraction needs a few frames before it reports anything sane;
-    # what matters here is that every model builds and both view modes come back.
-    for name in BG_MODELS:
-        s = replace(base, bgsub_on=True, bg_model=name, learning_rate=0.5)
-        for _ in range(3):
-            assert pipe.process(frame, s)[0].shape == frame.shape
-        assert pipe.process(frame, replace(s, mask_only=False))[0].shape == frame.shape
-    # Only the compensated model reports a camera-motion estimate.
-    assert "gmc=" in pipe.process(frame, replace(base, bgsub_on=True, bg_model=COMPENSATED))[1]
+    # Section A feeds the detector: the temperature index is taken from the
+    # *adjusted* frame, never the raw one.
+    lit = replace(base, brightness=60, blur=5)
+    assert (plume.temp_index(adjust(frame, lit)) != plume.temp_index(frame)).any()
+
+    # Every view must come back displayable, with or without anything to find.
+    for view in PLUME_VIEWS:
+        s = replace(base, plume_on=True, plume_view=view, p_src=90.0, sd_min=5.0, min_area=10)
+        out, note = pipe.process(frame, s)
+        assert out.shape == frame.shape, f"{view} changed the frame size"
+        assert "plumes=" in note, note
 
     print("pipeline ok")
 

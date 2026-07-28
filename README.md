@@ -17,21 +17,22 @@ gui/
   controls/
     base.py                 Knob (slider + readout) and the Section base class
     basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
-    background.py           B: model choice, history, varThreshold, learning rate
+    plume.py                B: source finding, then the plume grown out of it
 processing/
   video_thread.py           QThread: decode, process, emit QImages
   pipeline.py               the OpenCV chain -- no Qt, importable on its own
-  motion.py                 moving-camera background subtraction
+  plume.py                  single-frame steam plume segmentation
 ```
 
 ## Frame chain
 
-    raw frame -> adjustments -> background subtraction -> colour space
+    raw frame -> adjustments -> plume detection -> colour space
 
-Section A is not cosmetic: the background model reads the frame it produces, so
-brightness, contrast, gamma and the denoise blur are the levers for cleaning up
-an image *before* it gets masked. The colour space conversion happens last, so
-switching to HSV changes what you see and never what the model measured.
+Section A is not cosmetic: the detector reads the frame it produces, and every
+threshold in Section B is a *percentile of that frame's histogram*. Brightness,
+contrast and gamma move the histogram, so settle Section A first, then calibrate
+Section B, then leave A alone. The colour space conversion happens last and is
+the one genuinely cosmetic stage.
 
 ## Settings cache
 
@@ -42,33 +43,35 @@ the defaults back. A missing or corrupt file is ignored rather than fatal, and a
 cache written before a knob existed still loads — the missing field keeps its
 default.
 
-## Background subtraction on a moving camera
+## Plume detection
 
-MOG2 and KNN model *this pixel* over time, so they only work when the pixel grid
-is nailed to the world. Under a drone every pixel changes and they charge the
-camera's own motion to the foreground -- on `voo_1.mp4` they call 15 % and 61 %
-of the frame moving, which is the whole plant outlined in white.
+Ported from this repo's earlier `steamdet/plume.py` (`git show 9fdd3dd^:steamdet/plume.py`)
+with the temporal half removed. The original ANDed three cues -- hot, textured
+and *moving* -- and got the motion term by aligning neighbouring frames. Camera
+motion compensation never earned its cost on drone footage, so this keeps the two
+cues that need only the frame in front of you:
 
-The third model, **Compensated (moving camera)**, estimates the frame-to-frame
-camera warp (sparse Lucas-Kanade, ORB or ECC) and warps its background model to
-follow it before comparing. Same clip: 1.4 % foreground, and it is the plume.
-It is a numpy port of the dual-mode SGM with age from Yi et al., CVPRW 2013,
-["Detection of Moving Objects with Non-Stationary Cameras in 5.8ms"](https://www.cv-foundation.org/openaccess/content_cvpr_workshops_2013/W03/papers/Yi_Detection_of_Moving_2013_CVPR_paper.pdf)
-([reference C++](https://github.com/kmyid/fastMCD)) -- an apparent and a
-candidate Gaussian per block, so something lingering over one spot keeps
-resetting the candidate instead of being learned as background. ~5 ms/frame at
-960x540.
+* **Temperature.** The clip is not radiometric -- the camera baked a colormap in
+  -- but HLS lightness rises monotonically along that palette, so `L` is a
+  temperature proxy (r = 0.96 against a full inverse-LUT reconstruction). Every
+  threshold is a percentile, never a grey level, because the camera runs AGC.
+* **Texture.** Above the top of the palette the sensor dithers, so the hottest
+  things come out speckled rather than flat. High local sigma is the signature.
+* **Geometry.** Plumes rise, so each source's search region runs from its own
+  base upward. That one line keeps hot ground and vehicles out of the mask.
 
-Two things to know when tuning it:
+Detection is two stages, and the panel is grouped the same way: find the vents
+(hot **and** dithered), then grow a plume out of each one by hysteresis -- keep
+the blobs containing a core pixel, then walk outward through saturated pixels and
+finally a few steps into the cooler halo. Masks carry `0 = background, 1 = halo,
+2 = core`, so one array holds both extents. ~30-60 ms/frame at 640x512.
 
-* **Keep History short.** Once camera motion is cancelled, a plume venting from
-  a fixed spot is *stationary*, and a long history will learn it. What still
-  gives it away is that it churns.
-* **The anchored stem is invisible to it.** The base of the jet is clipped white
-  in every frame, so its temporal residual is zero. This finds the churning
-  head, not the column.
-
-## Threading
+**Known limit.** Texture does not separate the plume from hot dithered equipment
+on `voo_1.mp4` -- measured at the native 640x512, plume sigma averages 24.2 and
+the hot equipment 25.1. Both sit at the top of the palette and both dither. The
+motion cue is what used to reject static hot metal; without it, expect the plant's
+hot surfaces among the detections and use `p_src`, `Source min area` and the
+search margin to cut them down.## Threading
 
 `VideoThread` owns the capture and the pipeline. The GUI sends it settings by
 rebinding one frozen dataclass (atomic, no lock) and gets finished QImages back
@@ -82,5 +85,6 @@ through signals, so decoding never blocks the widgets.
 
 ```bash
 uv run python -m processing.pipeline   # asserts the chain over every toggle
-uv run python -m processing.motion     # asserts detection under a synthetic pan
+uv run python -m processing.plume      # asserts a synthetic vent is found and
+                                       # a smooth hot slab is not
 ```

@@ -1,6 +1,6 @@
 """The two control sections of the panel, one module each."""
 
-from .background import BackgroundSection
 from .basic import BasicSection
+from .plume import PlumeSection
 
-__all__ = ["BackgroundSection", "BasicSection"]
+__all__ = ["BasicSection", "PlumeSection"]

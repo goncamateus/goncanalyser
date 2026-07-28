@@ -69,9 +69,6 @@ class VideoThread(QThread):
         self.playing = False
         self._seek = max(0, self._index + frames)
 
-    def reset_background(self) -> None:
-        self._pipeline.reset_background()
-
     # --- the worker loop ----------------------------------------------------
 
     def run(self) -> None:
