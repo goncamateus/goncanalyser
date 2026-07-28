@@ -113,10 +113,12 @@ def source_roi(box, shape, cfg: PlumeConfig) -> tuple[int, int, int, int]:
     single cheapest way to keep hot ground, vehicles and pipe runs out of the
     mask — they are as bright as the plume, but they are never above it.
 
-    The original picked the sideways extent from the motion mask, so the box
-    followed the plume as the wind pushed it. Without motion there is nothing to
-    follow, so it pads by `roi_margin` and lets the growth step below find the
-    drift instead.
+    The cut is *exactly* the source base, with no downward slack. The original
+    padded below by `roi_margin` and could afford to, because its motion cue
+    rejected the static equipment that padding let in. Without motion the growth
+    step walks straight down into any hot slab under the vent, so the geometry
+    has to do that work alone. `roi_margin` still pads sideways, where a plume
+    genuinely drifts with the wind.
     """
     h_img, w_img = shape
     x, y, w, h = box
@@ -124,7 +126,7 @@ def source_roi(box, shape, cfg: PlumeConfig) -> tuple[int, int, int, int]:
         max(0, x - cfg.roi_margin),
         0,
         min(w_img, x + w + cfg.roi_margin),
-        min(h_img, y + h + cfg.roi_margin),
+        min(h_img, y + h),
     )
 
 
@@ -170,8 +172,16 @@ def plume_mask(temp: np.ndarray, sigma: np.ndarray, cfg: PlumeConfig, roi=None) 
     # Hysteresis growth: walk out from what was found, first through the saturated
     # column and then a few steps into the cooler halo around it. Bounded steps, so
     # a leak into the plant can only travel so far.
+    #
+    # The reach is temperature *only* — deliberately looser than `cand` above,
+    # which also demands texture. That gap is the entire mechanism: if the reach
+    # were the same predicate the candidate blob was built from, every pixel it
+    # could add would already be in the blob's connected component, and both
+    # sliders would move nothing at all. What growth recovers is the part of the
+    # plume that is hot and connected but *smooth* — a clipped, saturated column
+    # reads as flat, and the wispy outer halo is only half textured.
     for level, steps in ((t_hi, cfg.grow_hot), (t_lo, cfg.grow_warm)):
-        reach = ((temp >= level) & rough).astype(np.uint8)
+        reach = (temp >= level).astype(np.uint8)
         for _ in range(steps):
             plume |= cv2.dilate(plume, kernel(5)) & reach
 
