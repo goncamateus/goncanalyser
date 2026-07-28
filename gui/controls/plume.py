@@ -79,6 +79,41 @@ class PlumeSection(Section):
             field="grow_warm", cast=int,
         )
 
+        # --- holding it steady across frames ---------------------------------
+        self.note(
+            "<b>Tracking</b> — the raw detector changed how many sources it found on "
+            "36 of 59 frame transitions on <i>voo_1</i>. These follow each source "
+            "across frames instead."
+        )
+        self.track_on = self.check("Track sources across frames", checked=True, field="track_on")
+        self.max_age = self.knob(
+            "Coast for (frames)", 0, 15, 3,
+            tip="how long a source is held after the detector loses it — this is what "
+                "bridges a 1-2 frame dropout",
+            field="max_age", cast=int,
+        )
+        self.min_hits = self.knob(
+            "Confirm after (frames)", 1, 10, 2,
+            tip="detections before a new source is shown at all; 1 shows every speck",
+            field="min_hits", cast=int,
+        )
+        self.max_distance = self.knob(
+            "Match within (px)", 5, 300, 60,
+            tip="how far a source may move between frames and still be the same one",
+            field="max_distance",
+        )
+        self.measure_var = self.knob(
+            "Detection noise", 1, 200, 24,
+            tip="how much the filter distrusts each detection; raise it to smooth harder",
+            field="measure_var",
+        )
+        self.process_var = self.knob(
+            "Motion noise", 1, 100, 12,
+            tip="how much the plume is expected to move on its own; raise it to follow "
+                "fast drift, lower it to smooth harder",
+            field="process_var",
+        )
+
         self.note(
             "Every threshold is a <b>percentile of the frame</b>, not a grey level — the "
             "camera runs AGC, so the same brightness is not the same temperature two "

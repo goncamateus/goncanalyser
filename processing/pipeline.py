@@ -17,13 +17,14 @@ Processing order for one frame:
       -> colour space view (last, so it never changes what the detector saw)
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from functools import lru_cache
 
 import cv2
 import numpy as np
 
-from . import labels, plume
+from . import labels, plume, tracking
 
 # Label -> OpenCV conversion code. `None` means "leave it as BGR".
 # Order matters: the GUI combo box is built from these keys.
@@ -94,6 +95,15 @@ class Settings:
     grow_hot: int = 30
     grow_warm: int = 8
     roi_margin: int = 20
+
+    # --- Section B: temporal tracking ---
+    # Mirrors tracking.TrackConfig field for field, like the block above.
+    track_on: bool = True
+    max_age: int = 3
+    min_hits: int = 2
+    max_distance: float = 60.0
+    process_var: float = 12.0
+    measure_var: float = 24.0
 
 
 @lru_cache(maxsize=64)
@@ -167,16 +177,117 @@ def plume_config(s: Settings) -> plume.PlumeConfig:
     return plume.PlumeConfig(**{n: getattr(s, n) for n in names})
 
 
-class Pipeline:
-    """The whole per-frame chain.
+def track_config(s: Settings) -> tracking.TrackConfig:
+    """Same trick for the tracker's knobs. `on` is spelled `track_on` in Settings."""
+    names = {f.name for f in fields(tracking.TrackConfig)} - {"on"}
+    return tracking.TrackConfig(on=s.track_on, **{n: getattr(s, n) for n in names})
 
-    Stateless now that the background models are gone: the plume detector reads
-    one frame and holds nothing between calls, which is why seeking backwards is
-    instant and why a slider change re-renders the paused frame exactly.
+
+def shift_mask(mask: np.ndarray, drift) -> np.ndarray:
+    """A coasted track's stale mask, moved to where the filter says it is now.
+
+    The drone keeps flying during a dropout, so a mask pinned to where the plume
+    was three frames ago is worse than no mask at all. Whole-array roll rather
+    than a warp: the shift is a handful of pixels and integer, so there is
+    nothing to interpolate.
+    """
+    dx, dy = drift
+    if not dx and not dy:
+        return mask
+    return np.roll(np.roll(mask, dy, axis=0), dx, axis=1)
+
+
+class Pipeline:
+    """The whole per-frame chain, plus the tracker's memory of recent frames.
+
+    Detection itself is stateless — one frame in, one set of masks out. The
+    tracker is not, and that costs something worth being explicit about:
+
+    * **Track state belongs to a contiguous run of frames.** Seek anywhere other
+      than the next frame and the history is meaningless, so it is thrown away.
+    * **Re-rendering a frame must not advance the filter.** Dragging a slider
+      re-runs `process` on the same frame many times a second; without a rewind,
+      each redraw would step the Kalman filter again and the tracks would sprint
+      off while the video sat still. So the state from *before* the current frame
+      is kept, and a repeat of that frame restores it first.
+
+    Together those two keep the useful half of the old stateless promise: what
+    you see on a paused frame is what you get, however many times it is redrawn.
     """
 
+    def __init__(self) -> None:
+        self._tracker = tracking.Tracker()
+        self._index: int | None = None  # the frame the tracker has consumed
+        self._rewind: tracking.Tracker | None = None  # its state before that frame
+        self._cfg: tracking.TrackConfig | None = None
+
+    def reset_tracks(self) -> None:
+        self._tracker.reset()
+        self._index, self._rewind = None, None
+
+    def _detect(self, adjusted: np.ndarray, s: Settings, index: int | None):
+        """(temperature index, raw detections, tracked detections) for one frame."""
+        # .get, not []: a settings cache written before a space existed must not
+        # crash the worker thread on the first frame.
+        code, channel = DETECTOR_CHANNELS.get(
+            s.color_space, DETECTOR_CHANNELS["Default (BGR)"]
+        )
+        temp = plume.temp_index(adjusted, code, channel)
+        found = plume.plume_masks(temp, plume_config(s))
+        return temp, found, self._track(found, s, index)
+
+    def detections(self, bgr: np.ndarray, s: Settings, index: int | None = None) -> list:
+        """The tracked plume masks for one frame, with nothing drawn.
+
+        What the export needs. Safe to call on a frame `process` has already
+        consumed: repeating an index rewinds the tracker rather than stepping it.
+        """
+        if not s.plume_on:
+            return []
+        return self._detect(adjust(bgr, s), s, index)[2]
+
+    def _track(self, found, s: Settings, index: int | None):
+        """Run the tracker over this frame's detections; return what to draw.
+
+        Returns `[(roi, box, mask)]`, the same shape the detector produces, so
+        every caller downstream stays unaware that tracking happened at all.
+        """
+        cfg = track_config(s)
+        if not cfg.on or index is None:
+            return found
+
+        if cfg != self._cfg:
+            # A knob moved: the tracks were built under rules that no longer
+            # apply, so they are not evidence of anything.
+            self._tracker.reset(cfg)
+            self._index, self._rewind, self._cfg = None, None, cfg
+
+        if index == self._index and self._rewind is not None:
+            self._tracker = deepcopy(self._rewind)  # same frame again: rewind
+        else:
+            if self._index is None or index != self._index + 1:
+                self._tracker.reset(cfg)  # not consecutive: no usable history
+            self._rewind = deepcopy(self._tracker)
+            self._index = index
+
+        boxes = [box for _, box, _ in found]
+        shown = self._tracker.update(boxes, found)
+        kept = [
+            (roi, box, mask if track.age == 0 else shift_mask(mask, track.drift))
+            for track in shown
+            for roi, box, mask in [track.payload]
+        ]
+        # Back to left-to-right. The tracker hands them over oldest-first, which
+        # is stable but not what the #N labels mean — those run x=0 to x=max so a
+        # number keeps pointing at the same vent on screen.
+        return sorted(kept, key=lambda entry: (entry[1][0], entry[1][1]))
+
     def process(
-        self, bgr: np.ndarray, s: Settings, chosen: int | None = None
+        self,
+        bgr: np.ndarray,
+        s: Settings,
+        chosen: int | None = None,
+        index: int | None = None,
     ) -> tuple[np.ndarray, str, list]:
         """Run the chain. Returns (frame to display, status note, source centres).
 
@@ -196,14 +307,9 @@ class Pipeline:
         note, anchors = "", []
         if s.plume_on:
             # One colour space choice, two jobs: it names the channel the detector
-            # measures here, and the view it is painted on at the end.
-            # .get, not []: a settings cache written before a space existed must
-            # not crash the worker thread on the first frame.
-            code, channel = DETECTOR_CHANNELS.get(
-                s.color_space, DETECTOR_CHANNELS["Default (BGR)"]
-            )
-            temp = plume.temp_index(frame, code, channel)
-            found = plume.plume_masks(temp, plume_config(s))
+            # measures inside _detect, and the view painted at the end.
+            temp, raw_found, found = self._detect(frame, s, index)
+            raw_count = len(raw_found)
             anchors = [labels.centre(box) for _, box, _ in found]
             if s.plume_view == PLUME_VIEWS[1]:  # Mask
                 # Halo mid-grey, core white: one image showing both extents.
@@ -215,7 +321,11 @@ class Pipeline:
                 frame = plume.annotate(frame, found, s.plume_boxes, chosen)
             core = sum(int((m == 2).sum()) for *_, m in found)
             halo = sum(int((m == 1).sum()) for *_, m in found)
-            note = f"  plumes={len(found)} core={core} halo={halo}"
+            # Both counts, when they disagree: seeing "3(4)" is what tells you the
+            # tracker is holding a plume through a dropout rather than the
+            # detector having quietly got better.
+            shown = f"{len(found)}({raw_count})" if len(found) != raw_count else len(found)
+            note = f"  plumes={shown} core={core} halo={halo}"
 
         # Last, so the colour space view is purely cosmetic and never feeds back
         # into what the detector above measured.

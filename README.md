@@ -23,6 +23,7 @@ processing/
   video_thread.py           QThread: decode, process, emit QImages; plus ExportThread
   pipeline.py               the OpenCV chain -- no Qt, importable on its own
   plume.py                  single-frame steam plume segmentation
+  tracking.py               Kalman + association, to stop the detections flickering
   labels.py                 which detection is the real plume, per frame
   coco.py                   one-class COCO segmentation export
 ```
@@ -36,6 +37,36 @@ threshold in Section B is a *percentile of that frame's histogram*. Brightness,
 contrast and gamma move the histogram, so settle Section A first, then calibrate
 Section B, then leave A alone. The colour space conversion happens last and is
 the one genuinely cosmetic stage.
+
+## Tracking
+
+The raw detector is per-frame and unstable: measured over 60 consecutive frames of
+`voo_1.mp4`, it changed how many sources it found on **36 of 59** transitions,
+swinging between 2 and 5 as the hot equipment blinked in and out. A Kalman filter
+alone does not fix that -- a filter smooths a signal it is given, and the problem
+is the signal disappearing. So `tracking.py` is the usual three parts:
+
+* **associate** each frame's detections to existing tracks by distance
+* **coast** an unmatched track for `max_age` frames before dropping it, which
+  bridges a 1-2 frame dropout; its last mask is redrawn, shifted by the filter's
+  predicted motion so it keeps up with the drone
+* **confirm** a new track only after `min_hits` detections, so a one-frame speck
+  never reaches the screen
+
+The filter is constant-velocity over `[cx, cy, w, h]`. Velocity is what makes
+coasting worth anything -- a plume drifts and the drone moves, so a coasted track
+has to keep moving or the next association fails anyway.
+
+Result on the same 60 frames: count changes **36 -> 12**, at 23 -> 26 ms/frame.
+The status bar shows `plumes=4(3)` when the two disagree, so a held-through
+dropout is visible rather than silent.
+
+This is the only stateful thing in the chain, which costs two guarantees worth
+knowing about. Track state belongs to a *contiguous* run of frames, so any seek
+throws it away. And re-rendering a frame must not step the filter -- dragging a
+slider re-runs the chain many times a second on the same frame -- so the state
+from before the current frame is kept and restored on a repeat. A paused frame
+therefore renders identically however many times it is redrawn.
 
 ## Labelling and export
 
@@ -54,6 +85,10 @@ relabelling the wrong blob. A pick whose plume no longer exists is reported
 
 Labels live beside the settings cache, one file per video, written on every
 keystroke rather than at quit.
+
+Export warms the tracker up by decoding the frames before each labelled one, so
+the exported mask is the one that was on screen when the pick was made -- including
+on a frame where the plume was being coasted through a dropout.
 
 **Export COCO dataset…** writes `images/frame_%06d.png` plus
 `annotations/instances.json`. One category, `plume`, covering halo and core as a
@@ -121,4 +156,6 @@ uv run python -m processing.plume      # asserts a synthetic vent is found and
                                        # a smooth hot slab is not
 uv run python -m processing.labels     # asserts picks survive re-tuning
 uv run python -m processing.coco       # asserts the COCO schema by hand
+uv run python -m processing.tracking   # asserts a dropout is bridged and a
+                                       # jittering centre is smoothed
 ```

@@ -91,7 +91,31 @@ class Coco:
         path.write_text(json.dumps(self.as_dict()) + "\n")
 
 
-def export_dataset(video: str, settings, store, out_dir):
+def _detect_at(cap, pipeline, settings, index: int, warmup: int):
+    """Decode up to `warmup` frames before `index`, then detect on `index`.
+
+    Returns `(raw frame, detections)`, or None if the frame could not be read.
+
+    The warm-up is what gives the tracker the history it has during playback. It
+    is fed frames through the same `Pipeline.process`, so the state it arrives in
+    is the state the GUI was in — there is no second code path to keep in step.
+    """
+    start = max(0, index - warmup)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    raw = None
+    for at in range(start, index + 1):
+        ok, frame = cap.read()
+        if not ok:
+            return None
+        raw = frame
+        _, _, _ = pipeline.process(raw, settings, None, at)
+    # Re-run the emitted frame to read its detections back out. `process` is
+    # idempotent on a repeat of the same index — that is exactly what the
+    # tracker's rewind guarantees — so this does not advance anything.
+    return raw, pipeline.detections(raw, settings, index)
+
+
+def export_dataset(video: str, settings, store, out_dir, warmup: int = 12):
     """Write images + annotations for every labelled frame. Yields (done, total).
 
     A generator rather than a function so a caller can show progress and cancel by
@@ -101,12 +125,19 @@ def export_dataset(video: str, settings, store, out_dir):
     storing an anchor instead of an index is that the mask is recomputed under the
     *current* parameters and the anchor re-bound to it.
 
+    With tracking on, that re-run needs history. Labelled frames are scattered
+    through the clip, so each one is preceded by a **warm-up**: `warmup` frames
+    are decoded and fed to the tracker before the labelled frame is emitted. That
+    is what makes the exported mask the same one that was on screen when the pick
+    was made — including a frame where the plume was being coasted through a
+    dropout, which without warm-up would export nothing at all.
+
     The image written out is the **raw** decoded frame. Section A's brightness and
     blur are tuning aids for the detector, not part of the data — baking them in
     would ship a dataset nobody could reproduce from the source video. The mask
     coordinates are identical either way.
     """
-    from .pipeline import DETECTOR_CHANNELS, adjust, plume_config
+    from .pipeline import Pipeline
 
     out = Path(out_dir)
     images_dir = out / "images"
@@ -116,30 +147,25 @@ def export_dataset(video: str, settings, store, out_dir):
     total = len(frames)
     coco = Coco()
     lost: list[int] = []
+    pipeline = Pipeline()
 
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise OSError(f"cannot open {video}")
-    code, channel = DETECTOR_CHANNELS.get(
-        settings.color_space, DETECTOR_CHANNELS["Default (BGR)"]
-    )
-    cfg = plume_config(settings)
 
     try:
         for done, index in enumerate(frames, start=1):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-            ok, raw = cap.read()
-            if not ok:
+            found = _detect_at(cap, pipeline, settings, index, warmup)
+            if found is None:
                 lost.append(index)
                 yield done, total
                 continue
+            raw, detections = found
 
             label = store.labels[index]
             polys: list = []
             if not label.rejected:
-                temp = plume.temp_index(adjust(raw, settings), code, channel)
-                found = plume.plume_masks(temp, cfg)
-                anchors = [centre(box) for _, box, _ in found]
+                anchors = [centre(box) for _, box, _ in detections]
                 which = match(label.anchor, anchors, raw.shape)
                 if which is None:
                     # The anchor no longer names anything. Skipping the image

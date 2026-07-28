@@ -163,7 +163,7 @@ class VideoThread(QThread):
 
                 pick = self.chosen.get(self._index)
                 last_state = (s, pick)
-                work, note, anchors = self._pipeline.process(raw, s, pick)
+                work, note, anchors = self._pipeline.process(raw, s, pick, self._index)
 
                 self.frame_ready.emit(to_qimage(work))
                 self.position.emit(self._index)
