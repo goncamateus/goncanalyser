@@ -1,7 +1,7 @@
 [project]
-name = "steamdet"
-version = "0.1.0"
-description = "Exploratory OpenCV analysis of thermal steam plumes (hot core + cooler halo)"
+name = "video-tuner"
+version = "0.2.0"
+description = "Qt video player with live OpenCV tuning: adjustments, contours, background subtraction"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "numpy>=2.0",
@@ -10,15 +10,16 @@ dependencies = [
 ]
 
 [project.scripts]
-steam-detect = "steamdet.cli:main"
-steam-tune = "steamdet.tune:main"
-steam-gui = "steamdet.qtapp:main"
+video-tuner = "main:main"
 
 [dependency-groups]
 dev = ["pytest"]
 
+[tool.setuptools]
+py-modules = ["main"]
+
 [tool.setuptools.packages.find]
-include = ["steamdet*"]
+include = ["gui*", "processing*"]
 
 [build-system]
 requires = ["setuptools"]
