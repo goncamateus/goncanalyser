@@ -18,10 +18,11 @@ gui/
     base.py                 Knob (slider + readout) and the Section base class
     basic.py                A: brightness / contrast / saturation / gamma / colour space
     contours.py             B: blur, Canny thresholds, min area
-    background.py           C: MOG2 or KNN, history, varThreshold, learning rate
+    background.py           C: model choice, history, varThreshold, learning rate
 processing/
   video_thread.py           QThread: decode, process, emit QImages
   pipeline.py               the OpenCV chain -- no Qt, importable on its own
+  motion.py                 moving-camera background subtraction
 ```
 
 ## Frame chain
@@ -30,6 +31,32 @@ processing/
 
 Detection runs on the adjusted frame, and the colour space conversion happens
 last, so switching to HSV changes what you see and never what was measured.
+
+## Background subtraction on a moving camera
+
+MOG2 and KNN model *this pixel* over time, so they only work when the pixel grid
+is nailed to the world. Under a drone every pixel changes and they charge the
+camera's own motion to the foreground -- on `voo_1.mp4` they call 15 % and 61 %
+of the frame moving, which is the whole plant outlined in white.
+
+The third model, **Compensated (moving camera)**, estimates the frame-to-frame
+camera warp (sparse Lucas-Kanade, ORB or ECC) and warps its background model to
+follow it before comparing. Same clip: 1.4 % foreground, and it is the plume.
+It is a numpy port of the dual-mode SGM with age from Yi et al., CVPRW 2013,
+["Detection of Moving Objects with Non-Stationary Cameras in 5.8ms"](https://www.cv-foundation.org/openaccess/content_cvpr_workshops_2013/W03/papers/Yi_Detection_of_Moving_2013_CVPR_paper.pdf)
+([reference C++](https://github.com/kmyid/fastMCD)) -- an apparent and a
+candidate Gaussian per block, so something lingering over one spot keeps
+resetting the candidate instead of being learned as background. ~5 ms/frame at
+960x540.
+
+Two things to know when tuning it:
+
+* **Keep History short.** Once camera motion is cancelled, a plume venting from
+  a fixed spot is *stationary*, and a long history will learn it. What still
+  gives it away is that it churns.
+* **The anchored stem is invisible to it.** The base of the jet is clipped white
+  in every frame, so its temporal residual is zero. This finds the churning
+  head, not the column.
 
 ## Threading
 
@@ -45,4 +72,5 @@ through signals, so decoding never blocks the widgets.
 
 ```bash
 uv run python -m processing.pipeline   # asserts the chain over every toggle
+uv run python -m processing.motion     # asserts detection under a synthetic pan
 ```

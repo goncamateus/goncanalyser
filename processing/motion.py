@@ -27,6 +27,12 @@ Two things about this footage shape the defaults:
   Sharp static edges leave a residual proportional to their gradient, so every
   pixel is charged `edge_tolerance * |grad(background)|` of slack before it may
   be called foreground.
+
+Known ceiling: the anchored stem of the jet is clipped white in every single
+frame, so its temporal residual is zero and no motion-based method can see it.
+This finds the churning head, not the column. Recovering the stem means growing
+the mask along connected saturated pixels — a segmentation step, not a
+background-subtraction one, and deliberately not in this module.
 """
 
 import cv2
