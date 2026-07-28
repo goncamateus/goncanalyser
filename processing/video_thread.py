@@ -120,14 +120,14 @@ class VideoThread(QThread):
                     continue
 
                 last_settings = s
-                work, contours = self._pipeline.process(raw, s)
+                work, note = self._pipeline.process(raw, s)
 
                 self.frame_ready.emit(to_qimage(work))
                 self.position.emit(self._index)
                 self.status.emit(
                     f"frame {self._index}/{max(0, count - 1)}  "
                     f"{work.shape[1]}x{work.shape[0]}"
-                    f"{f'  contours={contours}' if s.contours_on else ''}  "
+                    f"{note}  "
                     f"{'playing' if self.playing else 'paused'}"
                 )
                 self.msleep(delay if self.playing else 10)
