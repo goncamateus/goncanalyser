@@ -83,7 +83,7 @@ class Clip:
         self._raw: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         self._stats: dict[tuple, tuple] = {}
 
-    def _at(self, idx: int):
+    def at(self, idx: int):
         """(frame, temp) for one raw frame index, cached.
 
         The cache is what makes playback bearable: stepping forward re-uses the
@@ -107,7 +107,7 @@ class Clip:
         """(frame, temp, motion, bg) around sampled frame `idx`. None if unreadable."""
         key = (idx, cfg.window, cfg.stride)
         if key not in self._stats:
-            got = [self._at(idx + k * cfg.stride) for k in range(-cfg.window, cfg.window + 1)]
+            got = [self.at(idx + k * cfg.stride) for k in range(-cfg.window, cfg.window + 1)]
             if any(g is None for g in got):
                 return None
             temps = [t for _, t in got]
