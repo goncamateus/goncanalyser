@@ -214,12 +214,18 @@ def plume_masks(temp: np.ndarray, cfg: PlumeConfig) -> list[tuple[tuple, tuple, 
             found.append((roi, box, mask, int((mask > 0).sum())))
 
     # Sources stack: the vent structure sits right under its own plume and claims
-    # it a second time. Biggest claim wins; the duplicates underneath go.
+    # it a second time. Biggest claim wins; the duplicates underneath go. This
+    # pass *must* run largest-first — that is what "biggest claim" means.
     kept: list[tuple[tuple, tuple, np.ndarray]] = []
     for roi, box, mask, area in sorted(found, key=lambda f: -f[3]):
         if all(int(((mask > 0) & (k > 0)).sum()) < 0.5 * area for _, _, k in kept):
             kept.append((roi, box, mask))
-    return kept
+
+    # Number them left to right, x = 0 to x = width. Area order is an artefact of
+    # the dedup above and makes #0 jump between sources the moment one grows past
+    # another; position is stable, so a label keeps meaning the same vent from
+    # frame to frame and while you drag a slider.
+    return sorted(kept, key=lambda entry: (entry[1][0], entry[1][1]))
 
 
 def polygons(mask: np.ndarray, value: int) -> list[np.ndarray]:
@@ -260,32 +266,42 @@ def heatmap(temp: np.ndarray) -> np.ndarray:
     return cv2.applyColorMap(temp, cv2.COLORMAP_INFERNO)
 
 
-def _demo() -> None:
-    """A synthetic vent: dithered hot column over smooth warm equipment.
+def _scene(columns, slab: bool) -> np.ndarray:
+    """A synthetic thermal frame: dithered plume columns, optionally over a slab.
 
-    The equipment is the whole point of the check. It is *hotter* than parts of
-    the plume and it is not moving, so temperature alone cannot reject it — only
-    the texture test and the plumes-rise geometry can.
+    `columns` is [(centre x, top y)]. Each is speckled, because that dither above
+    the top of the palette is the only thing marking a plume as a plume here.
     """
     rng = np.random.default_rng(11)
     frame = np.full((240, 320, 3), 40, np.uint8)
+    if slab:
+        # Smooth hot equipment across the bottom: bright, flat, must be rejected.
+        cv2.rectangle(frame, (0, 190), (320, 240), (255, 255, 255), -1)
+    for cx, top in columns:
+        for y in range(top, 195):
+            width = 8 + (195 - y) // 8  # widens as it rises, like a real plume
+            for x in range(cx - width, cx + width):
+                if rng.random() < 0.65:
+                    frame[y, x] = (255, 255, 255)
+                elif rng.random() < 0.5:
+                    frame[y, x] = (170, 170, 200)  # the cooler halo around the core
+    return frame
 
-    # Smooth hot slab across the bottom: the plant. Bright, flat, must be rejected.
-    cv2.rectangle(frame, (0, 190), (320, 240), (255, 255, 255), -1)
 
-    # A dithered column rising from a vent at x=150. Speckle is what marks it.
-    for y in range(60, 195):
-        width = 8 + (195 - y) // 8  # widens as it rises, like a real plume
-        for x in range(150 - width, 150 + width):
-            if rng.random() < 0.65:
-                frame[y, x] = (255, 255, 255)
-            elif rng.random() < 0.5:
-                frame[y, x] = (170, 170, 200)  # the cooler halo around the core
+def _demo() -> None:
+    """Two scenes, because they test different things and interfere with each other.
 
-    temp = temp_index(frame)
+    The slab is the point of the first: it is *hotter* than parts of the plume
+    and it is not moving, so temperature alone cannot reject it — only the
+    texture test and the plumes-rise geometry can. But its top edge is a
+    full-width ridge of high local sigma, and that ridge bridges two columns into
+    one source, which is exactly what the second scene must not have.
+    """
     cfg = PlumeConfig(p_src=95.0, sd_min=12.0, sd_plume=8.0, p_hi=95.0, p_lo=70.0, min_area=50)
 
-    # The texture test alone must already separate plume from slab.
+    # --- one vent over hot equipment: the equipment must stay out --------------
+    frame = _scene([(150, 60)], slab=True)
+    temp = temp_index(frame)
     sigma = local_sigma(temp)
     assert sigma[120, 150] > sigma[215, 160], "the dithered column must out-texture the slab"
 
@@ -301,7 +317,19 @@ def _demo() -> None:
     annotate(frame, found)
     assert (frame == before).all(), "annotate wrote into its input"
 
-    print(f"plume ok — {len(found)} source(s), {int((mask > 0).sum())} px masked")
+    # --- two vents: numbering runs left to right, never by size ---------------
+    # The right column is the taller one, so it masks more pixels — which is what
+    # would put it at #0 if the dedup pass's area ordering leaked into the result.
+    pair = temp_index(_scene([(90, 100), (220, 40)], slab=False))
+    both = plume_masks(pair, cfg)
+    assert len(both) == 2, f"expected both vents, got {len(both)}"
+
+    xs = [box[0] for _, box, _ in both]
+    areas = [int((m > 0).sum()) for *_, m in both]
+    assert xs == sorted(xs), f"sources are not ordered left to right: {xs}"
+    assert areas[1] > areas[0], "toothless unless the right-hand plume is the larger one"
+
+    print(f"plume ok — vents left-to-right at x={xs}, areas={areas}")
 
 
 if __name__ == "__main__":
