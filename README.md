@@ -55,6 +55,9 @@ cues that need only the frame in front of you:
   -- but HLS lightness rises monotonically along that palette, so `L` is a
   temperature proxy (r = 0.96 against a full inverse-LUT reconstruction). Every
   threshold is a percentile, never a grey level, because the camera runs AGC.
+  Which channel gets measured is Section A's colour space: each one hands the
+  detector its lightness-like channel (HLS/LAB `L`, HSV `V`, or grey), and
+  `Default (BGR)` leaves the picture alone while measuring HLS lightness.
 * **Texture.** Above the top of the palette the sensor dithers, so the hottest
   things come out speckled rather than flat. High local sigma is the signature.
 * **Geometry.** Plumes rise, so each source's search region runs from its own

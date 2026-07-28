@@ -30,8 +30,25 @@ from . import plume
 COLOR_SPACES: dict[str, int | None] = {
     "Default (BGR)": None,
     "Grayscale": cv2.COLOR_BGR2GRAY,
+    "HLS": cv2.COLOR_BGR2HLS,
     "HSV": cv2.COLOR_BGR2HSV,
     "LAB": cv2.COLOR_BGR2LAB,
+}
+
+# The single channel each colour space hands the plume detector: (code, index).
+# Section A picks one entry here, so the same choice drives what is measured and
+# what is displayed — the detector no longer has a colour space of its own.
+#
+# Each is that space's lightness-like channel, because the detector wants a
+# monotone stand-in for temperature. "Default (BGR)" keeps HLS lightness rather
+# than mapping to blue: it is the validated proxy (r = 0.96), and the natural
+# reading of "default" is "the one that works", not "the raw B plane".
+DETECTOR_CHANNELS: dict[str, tuple[int, int]] = {
+    "Default (BGR)": (cv2.COLOR_BGR2HLS, 1),  # L
+    "Grayscale": (cv2.COLOR_BGR2GRAY, 0),
+    "HLS": (cv2.COLOR_BGR2HLS, 1),  # L
+    "HSV": (cv2.COLOR_BGR2HSV, 2),  # V
+    "LAB": (cv2.COLOR_BGR2LAB, 0),  # L*
 }
 
 # What the plume section paints. "Outline" keeps the footage visible underneath,
@@ -168,7 +185,14 @@ class Pipeline:
 
         note = ""
         if s.plume_on:
-            temp = plume.temp_index(frame)
+            # One colour space choice, two jobs: it names the channel the detector
+            # measures here, and the view it is painted on at the end.
+            # .get, not []: a settings cache written before a space existed must
+            # not crash the worker thread on the first frame.
+            code, channel = DETECTOR_CHANNELS.get(
+                s.color_space, DETECTOR_CHANNELS["Default (BGR)"]
+            )
+            temp = plume.temp_index(frame, code, channel)
             found = plume.plume_masks(temp, plume_config(s))
             if s.plume_view == PLUME_VIEWS[1]:  # Mask
                 # Halo mid-grey, core white: one image showing both extents.
@@ -209,9 +233,14 @@ def _demo() -> None:
     smoothed = pipe.process(frame, replace(base, blur=5))[0]
     assert smoothed.shape == frame.shape and not (smoothed == frame).all()
 
+    # Every space must be displayable *and* offer the detector a channel — the
+    # two tables are read by different code paths and would drift apart silently.
+    assert COLOR_SPACES.keys() == DETECTOR_CHANNELS.keys()
     for name in COLOR_SPACES:
         out, _ = pipe.process(frame, replace(base, color_space=name))
         assert out.ndim == 3 and out.shape[2] == 3, f"{name} must stay displayable"
+        code, channel = DETECTOR_CHANNELS[name]
+        assert plume.temp_index(frame, code, channel).ndim == 2, f"{name} channel is not 2-D"
 
     # A zero kernel used to crash GaussianBlur; the clamp is what stops it.
     assert odd_kernel(0) == 1 and odd_kernel(4) == 5

@@ -55,16 +55,23 @@ CORE_COLOR = (255, 255, 0)  # cyan: the saturated core — white would vanish on
 ROI_COLOR = (80, 80, 255)  # red: the box a source was allowed to claim
 
 
-def temp_index(bgr: np.ndarray) -> np.ndarray:
-    """Relative temperature (uint8) = the L channel of HLS.
+def temp_index(bgr: np.ndarray, code: int = cv2.COLOR_BGR2HLS, channel: int = 1) -> np.ndarray:
+    """Relative temperature (uint8): one channel of one colour space.
 
-    The video is not radiometric: the camera baked a colormap into the pixels.
-    Along that palette (black -> purple -> red -> orange -> yellow -> white) HLS
-    lightness rises monotonically, so L is a temperature proxy — checked against a
-    full inverse-LUT reconstruction on these clips at r = 0.96. It is *relative*:
-    threshold it by percentile, never by a fixed value.
+    The default is the L channel of HLS. The video is not radiometric — the
+    camera baked a colormap into the pixels — but along that palette (black ->
+    purple -> red -> orange -> yellow -> white) HLS lightness rises
+    monotonically, so L is a temperature proxy, checked against a full
+    inverse-LUT reconstruction on these clips at r = 0.96.
+
+    It is *relative* whichever channel you pick: threshold by percentile, never
+    by a fixed value, because the camera runs AGC.
+
+    `code`/`channel` come from Section A's colour space, so the panel picks what
+    the detector measures rather than only what the screen shows.
     """
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2HLS)[:, :, 1]
+    converted = cv2.cvtColor(bgr, code)
+    return converted if converted.ndim == 2 else converted[:, :, channel]
 
 
 def kernel(k: int) -> np.ndarray:

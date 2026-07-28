@@ -34,4 +34,10 @@ class BasicSection(Section):
         )
 
         self.space = self.combo(COLOR_SPACES.keys(), field="color_space")
-        self.note("HSV and LAB are drawn as raw channels, i.e. false colour.")
+        self.note(
+            "This picks <b>what the plume detector measures</b>, not just the view: "
+            "each space hands it that space's lightness-like channel — HLS/LAB <i>L</i>, "
+            "HSV <i>V</i>, or grey. <b>Default (BGR)</b> leaves the picture alone and "
+            "measures HLS lightness, which is the proxy calibrated on these clips.<br><br>"
+            "HLS, HSV and LAB are <i>drawn</i> as raw channels, i.e. false colour."
+        )
