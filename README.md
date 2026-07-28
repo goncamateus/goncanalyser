@@ -18,10 +18,13 @@ gui/
     base.py                 Knob (slider + readout) and the Section base class
     basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
     plume.py                B: source finding, then the plume grown out of it
+    labelling.py            C: label counts, key legend, export button
 processing/
-  video_thread.py           QThread: decode, process, emit QImages
+  video_thread.py           QThread: decode, process, emit QImages; plus ExportThread
   pipeline.py               the OpenCV chain -- no Qt, importable on its own
   plume.py                  single-frame steam plume segmentation
+  labels.py                 which detection is the real plume, per frame
+  coco.py                   one-class COCO segmentation export
 ```
 
 ## Frame chain
@@ -33,6 +36,32 @@ threshold in Section B is a *percentile of that frame's histogram*. Brightness,
 contrast and gamma move the histogram, so settle Section A first, then calibrate
 Section B, then leave A alone. The colour space conversion happens last and is
 the one genuinely cosmetic stage.
+
+## Labelling and export
+
+The detector cannot separate a plume from hot dithered equipment (see the known
+limit below), so the last step is a human. Step through the clip and press the
+digit matching the `#N` drawn on the plume; `N` marks a frame as having no plume
+at all, `U` undoes. The pick is acknowledged on screen -- the chosen outline goes
+yellow and its label gains `OK`.
+
+A pick is stored as **a point in the image**, not as the number you pressed.
+Indices belong to the current parameters: nudge a percentile, a source appears,
+and every index after it shifts. An anchor belongs to the scene, so re-tuning
+re-binds each label to whichever detection is now nearest instead of silently
+relabelling the wrong blob. A pick whose plume no longer exists is reported
+*lost* rather than guessed at, and is left out of the export.
+
+Labels live beside the settings cache, one file per video, written on every
+keystroke rather than at quit.
+
+**Export COCO dataset…** writes `images/frame_%06d.png` plus
+`annotations/instances.json`. One category, `plume`, covering halo and core as a
+single outline -- there is no separate core or source class. One annotation per
+image, whose `segmentation` is a list of polygons when the mask is in several
+pieces. Rejected frames export as an image with no annotation, which is a genuine
+negative sample. The image written is the **raw** decoded frame: Section A's
+adjustments are tuning aids for the detector, not part of the data.
 
 ## Settings cache
 
@@ -90,4 +119,6 @@ through signals, so decoding never blocks the widgets.
 uv run python -m processing.pipeline   # asserts the chain over every toggle
 uv run python -m processing.plume      # asserts a synthetic vent is found and
                                        # a smooth hot slab is not
+uv run python -m processing.labels     # asserts picks survive re-tuning
+uv run python -m processing.coco       # asserts the COCO schema by hand
 ```

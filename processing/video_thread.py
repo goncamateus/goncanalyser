@@ -20,6 +20,43 @@ from PyQt6.QtGui import QImage
 from .pipeline import Pipeline, Settings
 
 
+class ExportThread(QThread):
+    """Writes the COCO dataset without freezing the window.
+
+    Export re-decodes and re-detects every labelled frame — a few hundred of them
+    at ~40 ms each is tens of seconds, which is far too long to spend on the GUI
+    thread. `coco.export_dataset` is a generator precisely so this wrapper can be
+    this small and stay the only Qt-aware part of the export path.
+    """
+
+    progress = pyqtSignal(int, int)  # done, total
+    finished_with = pyqtSignal(dict)  # counts, plus any labels that went stale
+    failed = pyqtSignal(str)
+
+    def __init__(self, video: str, settings, store, out_dir):
+        super().__init__()
+        self.video = video
+        self.settings = settings
+        self.store = store
+        self.out_dir = out_dir
+
+    def run(self) -> None:
+        from .coco import export_dataset
+
+        try:
+            steps = export_dataset(self.video, self.settings, self.store, self.out_dir)
+            while True:
+                try:
+                    done, total = next(steps)
+                except StopIteration as done_with:
+                    # The generator's return value carries the summary.
+                    self.finished_with.emit(done_with.value or {})
+                    return
+                self.progress.emit(done, total)
+        except (OSError, ValueError) as exc:
+            self.failed.emit(str(exc))
+
+
 def to_qimage(bgr: np.ndarray) -> QImage:
     """BGR ndarray -> QImage that owns its pixels.
 
@@ -38,6 +75,7 @@ class VideoThread(QThread):
     frame_ready = pyqtSignal(QImage)  # a finished, displayable frame
     opened = pyqtSignal(int, float)  # frame count, fps — once the file is readable
     position = pyqtSignal(int)  # current frame index, so the seek bar follows
+    detected = pyqtSignal(int, list)  # frame index + source centres, for labelling
     status = pyqtSignal(str)  # one line for the status bar
     failed = pyqtSignal(str)  # the file could not be opened
 
@@ -45,6 +83,10 @@ class VideoThread(QThread):
         super().__init__()
         self.path = path
         self.settings = settings  # rebound by the GUI, never mutated in place
+        # {frame index: chosen detection index}. Rebound wholesale by the GUI,
+        # same lock-free deal as `settings`. Read only to tick the picked plume,
+        # so the worst a stale read costs is one frame drawn without its tick.
+        self.chosen: dict[int, int | None] = {}
         self.playing = True
         self._running = True
         self._index = 0  # frame the worker is currently sitting on
@@ -83,7 +125,7 @@ class VideoThread(QThread):
         self.opened.emit(count, fps)
 
         raw: np.ndarray | None = None  # the last decoded frame, kept for re-renders
-        last_settings: Settings | None = None
+        last_state: tuple | None = None  # (settings, chosen) the last draw used
 
         try:
             while self._running:
@@ -110,17 +152,22 @@ class VideoThread(QThread):
                         continue
                     raw = frame
                     self._index = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                elif s == last_settings:  # dataclass equality, not identity
-                    # Paused on a frame nobody re-tuned: nothing new to draw, and
-                    # redrawing anyway would spin a core on a still image.
+                elif (s, self.chosen.get(self._index)) == last_state:
+                    # Paused on a frame nobody re-tuned or re-labelled: nothing new
+                    # to draw, and redrawing anyway would spin a core on a still
+                    # image. The label has to be part of that comparison — pressing
+                    # a number key while paused must repaint, or the tick that
+                    # acknowledges the pick never appears.
                     self.msleep(30)
                     continue
 
-                last_settings = s
-                work, note = self._pipeline.process(raw, s)
+                pick = self.chosen.get(self._index)
+                last_state = (s, pick)
+                work, note, anchors = self._pipeline.process(raw, s, pick)
 
                 self.frame_ready.emit(to_qimage(work))
                 self.position.emit(self._index)
+                self.detected.emit(self._index, anchors)
                 self.status.emit(
                     f"frame {self._index}/{max(0, count - 1)}  "
                     f"{work.shape[1]}x{work.shape[0]}"

@@ -23,7 +23,7 @@ from functools import lru_cache
 import cv2
 import numpy as np
 
-from . import plume
+from . import labels, plume
 
 # Label -> OpenCV conversion code. `None` means "leave it as BGR".
 # Order matters: the GUI combo box is built from these keys.
@@ -175,15 +175,25 @@ class Pipeline:
     instant and why a slider change re-renders the paused frame exactly.
     """
 
-    def process(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, str]:
-        """Run the chain. Returns the displayable frame and a note for the status bar."""
+    def process(
+        self, bgr: np.ndarray, s: Settings, chosen: int | None = None
+    ) -> tuple[np.ndarray, str, list]:
+        """Run the chain. Returns (frame to display, status note, source centres).
+
+        The centres go back to the GUI so a human can pick one by number and have
+        the choice stored as a point in the image. Centres rather than masks:
+        they are all the picking needs, and they cost nothing to queue across the
+        thread boundary — a per-frame list of masks would not.
+
+        `chosen` is the index already labelled for this frame, drawn ticked.
+        """
         # Section A feeds the detector: brightness, contrast, gamma and the blur
         # all land before the temperature index is taken. That is also the catch —
         # every threshold below is a percentile of this frame's histogram, so
         # moving a Section A slider re-tunes the detector under you.
         frame = adjust(bgr, s)
 
-        note = ""
+        note, anchors = "", []
         if s.plume_on:
             # One colour space choice, two jobs: it names the channel the detector
             # measures here, and the view it is painted on at the end.
@@ -194,6 +204,7 @@ class Pipeline:
             )
             temp = plume.temp_index(frame, code, channel)
             found = plume.plume_masks(temp, plume_config(s))
+            anchors = [labels.centre(box) for _, box, _ in found]
             if s.plume_view == PLUME_VIEWS[1]:  # Mask
                 # Halo mid-grey, core white: one image showing both extents.
                 stack = sum((m for *_, m in found), np.zeros(temp.shape, np.uint8))
@@ -201,14 +212,14 @@ class Pipeline:
             else:
                 if s.plume_view == PLUME_VIEWS[2]:  # Temperature index
                     frame = plume.heatmap(temp)
-                frame = plume.annotate(frame, found, s.plume_boxes)
+                frame = plume.annotate(frame, found, s.plume_boxes, chosen)
             core = sum(int((m == 2).sum()) for *_, m in found)
             halo = sum(int((m == 1).sum()) for *_, m in found)
             note = f"  plumes={len(found)} core={core} halo={halo}"
 
         # Last, so the colour space view is purely cosmetic and never feeds back
         # into what the detector above measured.
-        return to_color_space(frame, s.color_space), note
+        return to_color_space(frame, s.color_space), note, anchors
 
 
 def _demo() -> None:
@@ -220,7 +231,7 @@ def _demo() -> None:
     pipe = Pipeline()
     base = Settings()
 
-    out, note = pipe.process(frame, base)
+    out, note, _ = pipe.process(frame, base)
     assert out.shape == frame.shape and note == "", "defaults must be a passthrough"
     assert (out == frame).all(), "identity settings must not touch the pixels"
 
@@ -237,7 +248,7 @@ def _demo() -> None:
     # two tables are read by different code paths and would drift apart silently.
     assert COLOR_SPACES.keys() == DETECTOR_CHANNELS.keys()
     for name in COLOR_SPACES:
-        out, _ = pipe.process(frame, replace(base, color_space=name))
+        out, *_ = pipe.process(frame, replace(base, color_space=name))
         assert out.ndim == 3 and out.shape[2] == 3, f"{name} must stay displayable"
         code, channel = DETECTOR_CHANNELS[name]
         assert plume.temp_index(frame, code, channel).ndim == 2, f"{name} channel is not 2-D"
@@ -259,7 +270,7 @@ def _demo() -> None:
     # Every view must come back displayable, with or without anything to find.
     for view in PLUME_VIEWS:
         s = replace(base, plume_on=True, plume_view=view, p_src=90.0, sd_min=5.0, min_area=10)
-        out, note = pipe.process(frame, s)
+        out, note, _ = pipe.process(frame, s)
         assert out.shape == frame.shape, f"{view} changed the frame size"
         assert "plumes=" in note, note
 

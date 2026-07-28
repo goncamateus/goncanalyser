@@ -19,9 +19,11 @@ from pathlib import Path
 from PyQt6.QtCore import QStandardPaths, Qt
 from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -30,10 +32,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from processing.labels import LabelStore
 from processing.pipeline import Settings
-from processing.video_thread import VideoThread
+from processing.video_thread import ExportThread, VideoThread
 
-from .controls import BasicSection, PlumeSection
+from .controls import BasicSection, LabelSection, PlumeSection
 
 PANEL_WIDTH = 380
 
@@ -47,6 +50,11 @@ def cache_file() -> Path:
     """
     root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
     return Path(root) / "settings.json"
+
+
+def label_dir() -> Path:
+    """Where per-video label files live, beside the settings cache."""
+    return cache_file().parent / "labels"
 
 
 def load_cached() -> dict:
@@ -82,10 +90,11 @@ class MainWindow(QMainWindow):
         self.path = path
         self.worker: VideoThread | None = None  # set at the end of __init__
 
-        # Panel order mirrors the frame chain: adjust, then detect.
+        # Panel order mirrors the frame chain: adjust, then detect, then label.
         self.basic = BasicSection()
         self.plume = PlumeSection()
-        self.sections = (self.basic, self.plume)
+        self.labelling = LabelSection()
+        self.sections = (self.basic, self.plume, self.labelling)
         # Pick up where the last session left off. Fields the file does not carry
         # keep the widget defaults, so an old cache survives a new knob.
         # cached = load_cached()
@@ -103,13 +112,30 @@ class MainWindow(QMainWindow):
         # Every section routes to the one method that rebuilds Settings.
         for section in self.sections:
             section.changed.connect(self.push_settings)
+        self.labelling.export_requested.connect(self.export_dataset)
+        self.labelling.clear_requested.connect(self.clear_labels)
+
+        # What the current frame offers to label, refreshed by the worker.
+        self.frame_index = 0
+        self.anchors: list = []
+        self.frames = 0
+        self.frame_shape = (512, 640)  # replaced by the first frame that arrives
+        self.exporter: ExportThread | None = None
+        self.store = LabelStore(path, label_dir(), asdict(self.settings)).load()
+        self.refresh_labels()
 
         for keys, slot in (
             ("Space", self.toggle_play),
             (".", lambda: self.step(+1)),
             (",", lambda: self.step(-1)),
+            ("N", self.reject_frame),
+            ("U", self.unlabel_frame),
         ):
             QShortcut(QKeySequence(keys), self, slot)
+        # One shortcut per digit; the default argument pins the value, or every
+        # lambda would close over the same `digit` and all ten would pick #9.
+        for digit in range(10):
+            QShortcut(QKeySequence(str(digit)), self, lambda d=digit: self.pick(d))
 
         self.worker = self._start_worker()
 
@@ -186,10 +212,126 @@ class MainWindow(QMainWindow):
         worker.frame_ready.connect(self.show_frame)
         worker.opened.connect(self.on_opened)
         worker.position.connect(self.on_position)
+        worker.detected.connect(self.on_detected)
         worker.status.connect(self.statusBar().showMessage)
         worker.failed.connect(self.statusBar().showMessage)
+        worker.chosen = self._chosen_map()
         worker.start()
         return worker
+
+    # --- labelling ----------------------------------------------------------
+
+    def on_detected(self, index: int, anchors: list) -> None:
+        """The worker just drew a frame: remember what it offers to label.
+
+        Then re-resolve the tick for it. This settles rather than looping: the
+        push makes the worker redraw once with the tick, that redraw emits the
+        same anchors, and the second resolve produces the same value the worker
+        already has, so its paused-frame check stops the cycle there.
+        """
+        self.frame_index, self.anchors = index, anchors
+        self.refresh_labels()
+
+    def _chosen_map(self) -> dict:
+        """{frame: detection index} for the worker's tick, re-anchored to *now*.
+
+        Only the current frame can be resolved here — the anchors for any other
+        frame belong to a detection run that has not happened. That is enough:
+        the tick is only ever drawn on the frame being displayed.
+        """
+        chosen = {}
+        picked = self.store.chosen(self.frame_index, self.anchors, self._shape())
+        if picked is not None:
+            chosen[self.frame_index] = picked
+        return chosen
+
+    def _shape(self) -> tuple[int, int]:
+        """Frame size for the anchor tolerance, in *image* pixels.
+
+        Not the pixmap's: that one is scaled to the widget, so reading it would
+        make the tolerance depend on how big the window happens to be.
+        """
+        return self.frame_shape
+
+    def pick(self, index: int) -> None:
+        """Label detection #index on the current frame as the real plume."""
+        if not self.store.pick(self.frame_index, self.anchors, index):
+            self.statusBar().showMessage(f"no plume #{index} on this frame")
+            return
+        self.refresh_labels()
+
+    def reject_frame(self) -> None:
+        """No plume here — a reviewed frame, and a negative sample."""
+        self.store.reject(self.frame_index)
+        self.refresh_labels()
+
+    def unlabel_frame(self) -> None:
+        self.store.clear(self.frame_index)
+        self.refresh_labels()
+
+    def clear_labels(self) -> None:
+        counts = self.store.summary()
+        if not counts["total"]:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Clear all labels",
+            f"Throw away all {counts['total']} labels for this clip?",
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.store.clear_all()
+            self.refresh_labels()
+
+    def refresh_labels(self) -> None:
+        """Push the labels at the worker and repaint the section's readout."""
+        self.store.config = asdict(self.settings)
+        if self.worker:
+            self.worker.chosen = self._chosen_map()
+        self.labelling.show_summary(self.store.summary(), self.frames, self._label_state())
+
+    def _label_state(self) -> str:
+        """How this frame reads right now, in the four states it can be in."""
+        label = self.store.get(self.frame_index)
+        if label is None:
+            return "unlabelled"
+        if label.rejected:
+            return "no plume (negative)"
+        picked = self.store.chosen(self.frame_index, self.anchors, self._shape())
+        # Labelled, but re-anchoring found nothing near the stored point: the
+        # detector no longer produces the plume that was picked.
+        return f"plume #{picked}" if picked is not None else "lost — re-label this frame"
+
+    # --- export -------------------------------------------------------------
+
+    def export_dataset(self) -> None:
+        if self.exporter is not None:
+            return  # already running; the button stays live but does nothing
+        if not self.store.labels:
+            self.statusBar().showMessage("nothing labelled yet")
+            return
+        out = QFileDialog.getExistingDirectory(self, "Export COCO dataset to…")
+        if not out:
+            return
+
+        self.exporter = ExportThread(self.path, self.settings, self.store, out)
+        self.exporter.progress.connect(
+            lambda done, total: self.statusBar().showMessage(f"exporting {done}/{total}…")
+        )
+        self.exporter.finished_with.connect(self.on_exported)
+        self.exporter.failed.connect(self.statusBar().showMessage)
+        self.exporter.start()
+
+    def on_exported(self, result: dict) -> None:
+        self.exporter = None
+        lost = result.get("lost") or []
+        # A lost label is the one thing here worth interrupting for: it means a
+        # pick no longer matches any detection, so those frames are missing from
+        # the dataset and the user would otherwise never know.
+        note = f" · {len(lost)} lost (re-label frames {lost[:5]}…)" if lost else ""
+        self.statusBar().showMessage(
+            f"exported {result.get('images', 0)} images, "
+            f"{result.get('annotations', 0)} annotations{note}"
+        )
 
     # --- transport ----------------------------------------------------------
 
@@ -210,6 +352,8 @@ class MainWindow(QMainWindow):
     def on_opened(self, count: int, fps: float) -> None:
         self.seek.setEnabled(count > 0)
         _muted(self.seek, lambda: self.seek.setRange(0, max(0, count - 1)))
+        self.frames = count
+        self.refresh_labels()
         self.statusBar().showMessage(f"{count} frames @ {fps:.1f} fps")
 
     def on_position(self, index: int) -> None:
@@ -221,6 +365,9 @@ class MainWindow(QMainWindow):
     # --- painting -----------------------------------------------------------
 
     def show_frame(self, image: QImage) -> None:
+        # Image pixels, before the scale-to-widget below: the anchor tolerance is
+        # measured in these, and must not move when the window is resized.
+        self.frame_shape = (image.height(), image.width())
         self.video.setPixmap(
             QPixmap.fromImage(image).scaled(
                 self.video.size(),

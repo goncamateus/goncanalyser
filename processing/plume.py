@@ -53,6 +53,7 @@ class PlumeConfig:
 HALO_COLOR = (0, 255, 0)  # BGR green: the plume's full extent
 CORE_COLOR = (255, 255, 0)  # cyan: the saturated core — white would vanish on white
 ROI_COLOR = (80, 80, 255)  # red: the box a source was allowed to claim
+PICK_COLOR = (0, 255, 255)  # yellow: the one a human labelled as the real plume
 
 
 def temp_index(bgr: np.ndarray, code: int = cv2.COLOR_BGR2HLS, channel: int = 1) -> np.ndarray:
@@ -240,23 +241,29 @@ def polygons(mask: np.ndarray, value: int) -> list[np.ndarray]:
     return [cv2.approxPolyDP(c, 1.0, True) for c in contours if cv2.contourArea(c) >= 32]
 
 
-def annotate(bgr: np.ndarray, found, boxes: bool = True) -> np.ndarray:
+def annotate(bgr: np.ndarray, found, boxes: bool = True, chosen: int | None = None) -> np.ndarray:
     """`bgr` with every plume outlined, drawn on a copy.
 
     Halo and core are drawn as separate outlines rather than as a filled mask, so
     you can still see the footage underneath while tuning — which is the whole
     point of a live tuner.
+
+    `chosen` is the index a human labelled as the real plume. It is drawn thicker
+    and ticked, because pressing a number key has to be visibly acknowledged —
+    otherwise there is no way to tell a registered pick from a missed keystroke.
     """
     out = bgr.copy()
     for i, (roi, _, mask) in enumerate(found):
+        picked = i == chosen
         for value, color in ((1, HALO_COLOR), (2, CORE_COLOR)):
-            cv2.polylines(out, polygons(mask, value), True, color, 2)
+            cv2.polylines(out, polygons(mask, value), True, color, 3 if picked else 2)
         if boxes:
             x0, y0, x1, y1 = roi
-            cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), ROI_COLOR, 1)
+            color = PICK_COLOR if picked else ROI_COLOR
+            cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), color, 2 if picked else 1)
             cv2.putText(
-                out, f"#{i}", (x0 + 4, y1 - 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, ROI_COLOR, 2, cv2.LINE_AA,
+                out, f"#{i}" + (" OK" if picked else ""), (x0 + 4, y1 - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
             )
     return out
 
