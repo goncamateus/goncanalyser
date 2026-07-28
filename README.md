@@ -18,7 +18,6 @@ gui/
     base.py                 Knob (slider + readout) and the Section base class
     basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
     background.py           B: model choice, history, varThreshold, learning rate
-    edges.py                C: blur, Canny lower/upper
 processing/
   video_thread.py           QThread: decode, process, emit QImages
   pipeline.py               the OpenCV chain -- no Qt, importable on its own
@@ -27,13 +26,12 @@ processing/
 
 ## Frame chain
 
-    raw frame -> adjustments -> background subtraction -> edges -> colour space
+    raw frame -> adjustments -> background subtraction -> colour space
 
-Edge detection runs *after* background subtraction and reads the motion mask
-itself, so with subtraction on you get the outline of what moved rather than the
-edges of a colour cut-out. With it off, the edges of the adjusted frame. The
-colour space conversion happens last, so switching to HSV changes what you see
-and never what was measured.
+Section A is not cosmetic: the background model reads the frame it produces, so
+brightness, contrast, gamma and the denoise blur are the levers for cleaning up
+an image *before* it gets masked. The colour space conversion happens last, so
+switching to HSV changes what you see and never what the model measured.
 
 ## Settings cache
 

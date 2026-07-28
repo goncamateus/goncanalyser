@@ -25,8 +25,9 @@ class BasicSection(Section):
             "Gamma", 0.1, 3.0, 1.0, 100, "<1 darkens, >1 lifts shadows", field="gamma"
         )
 
-        # 0 is off. Unlike the four above, this one is not purely cosmetic: the
-        # edge and background stages read the frame it produces.
+        # 0 is off. Quieting sensor noise here is what stops the background model
+        # calling every speckle a moving object — it reads the frame this section
+        # produces, not the raw one.
         self.blur = self.knob(
             "Blur (denoise)", 0, 31, 0, tip="0 or 1 = off; even values round up",
             field="blur", cast=int,

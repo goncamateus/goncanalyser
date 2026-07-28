@@ -14,9 +14,7 @@ Processing order for one frame:
       -> basic adjustments (brightness / contrast / saturation / gamma / blur)
       -> background subtraction (optional; replaces the frame with the motion
          mask, or with the colour frame masked down to the moving pixels)
-      -> edge detection (optional; run on whatever the previous stage produced,
-         painted on top or shown on its own)
-      -> colour space view (last, so it never changes what the detectors saw)
+      -> colour space view (last, so it never changes what the model saw)
 """
 
 from dataclasses import dataclass, replace
@@ -35,8 +33,6 @@ COLOR_SPACES: dict[str, int | None] = {
     "HSV": cv2.COLOR_BGR2HSV,
     "LAB": cv2.COLOR_BGR2LAB,
 }
-
-EDGE_COLOR = (0, 255, 255)  # BGR yellow — readable on both grey masks and colour frames
 
 # Background subtraction models, in the order the GUI lists them. The first two
 # assume the camera is bolted down; only the third survives a moving one.
@@ -76,13 +72,6 @@ class Settings:
     edge_tolerance: float = 1.5  # px of parallax slack, charged per unit of gradient
     min_age: int = 10  # frames a cell must be modelled before it may report
 
-    # --- Section C: edge detection ---
-    edges_on: bool = False
-    blur_kernel: int = 5  # Gaussian kernel; forced odd and >= 1 before use
-    canny_lo: int = 50
-    canny_hi: int = 150
-    edges_only: bool = False  # True = show the raw edge map, False = overlay it
-
 
 @lru_cache(maxsize=64)
 def gamma_lut(gamma: float) -> np.ndarray:
@@ -97,10 +86,9 @@ def adjust(bgr: np.ndarray, s: Settings) -> np.ndarray:
     costs nothing per frame. Nothing is written in place — the caller's frame may
     be reused (e.g. re-rendered while paused), so it must stay pristine.
 
-    The blur is last and it is not cosmetic: everything downstream reads this
-    frame, so it is the one knob here that quiets sensor noise for the detectors
-    rather than only for your eyes. It is a different kernel from the edge
-    section's, which blurs again just before edge detection.
+    None of this is only cosmetic: the background model reads the frame these
+    knobs produce, so brightness, contrast, gamma and above all the blur are how
+    you clean up the image *before* it is masked.
     """
     out = bgr
     if s.contrast != 1.0 or s.brightness:
@@ -144,36 +132,6 @@ def odd_kernel(size: int) -> int:
     """
     size = max(1, int(size))
     return size if size % 2 else size + 1
-
-
-def find_edges(img: np.ndarray, s: Settings) -> np.ndarray:
-    """Blur, then Canny. Returns the edge map (uint8, 0 or 255).
-
-    The blur is what makes the thresholds mean anything: Canny differentiates,
-    and differentiating raw sensor noise produces edges everywhere. Kernel and
-    both thresholds are the section's three knobs.
-
-    Works on a colour frame or on a single-channel mask. On a mask the result is
-    each blob's rim, which is the useful thing to look at when the previous stage
-    was background subtraction.
-    """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    k = odd_kernel(s.blur_kernel)
-    if k > 1:
-        gray = cv2.GaussianBlur(gray, (k, k), 0)
-    return cv2.Canny(gray, s.canny_lo, s.canny_hi)
-
-
-def draw_edges(bgr: np.ndarray, edges: np.ndarray) -> np.ndarray:
-    """Edges painted onto a copy — never into a frame someone else may reuse.
-
-    Boolean indexing rather than `drawContours`: there are no contours here, just
-    a pixel map, and painting it directly keeps every single-pixel edge Canny
-    found instead of only the ones that close into a loop.
-    """
-    out = bgr.copy()
-    out[edges > 0] = EDGE_COLOR
-    return out
 
 
 class BackgroundModel:
@@ -260,19 +218,15 @@ class BackgroundModel:
         note = f" gmc={inliers}in" if inliers else " gmc=NONE"
         return self._sub.apply(gray, warp), note
 
-    def apply(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, np.ndarray, str]:
-        """(what to display, the raw mask, a note).
-
-        The mask comes back alongside the rendering because the edge stage
-        wants the blobs themselves, not whatever the view mode chose to paint.
-        """
+    def apply(self, bgr: np.ndarray, s: Settings) -> tuple[np.ndarray, str]:
+        """Motion mask (B/W) or the foreground (mask applied to the colour frame)."""
         self._ensure(s)
         mask, note = self._mask(bgr, s)
         if s.mask_only:
-            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), mask, note
+            return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), note
         # MOG2 marks shadows as 127 and they survive `bitwise_and`, which is what
         # you want: a shadowed part of a moving object is still the moving object.
-        return cv2.bitwise_and(bgr, bgr, mask=mask), mask, note
+        return cv2.bitwise_and(bgr, bgr, mask=mask), note
 
 
 class Pipeline:
@@ -294,24 +248,17 @@ class Pipeline:
         different things worth reporting — and a camera-motion estimate that
         failed has to be visible, since it looks identical to a working one.
         """
+        # Section A feeds the subtractor: brightness, contrast, gamma and the
+        # denoise blur all land before the background model ever sees a pixel, so
+        # tuning them up there is how you clean up what gets masked down here.
         frame = adjust(bgr, s)
 
-        note, mask = "", None
+        note = ""
         if s.bgsub_on:
-            frame, mask, note = self.background.apply(frame, s)
-
-        if s.edges_on:
-            # Read the mask, not the rendering. In the Foreground view the frame
-            # is a colour cut-out, so Canny on it would find the cut-out's border
-            # and every bit of texture inside it rather than the moving regions.
-            edges = find_edges(mask if mask is not None else frame, s)
-            frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR) if s.edges_only else draw_edges(
-                frame, edges
-            )
-            note += f" edges={(edges > 0).mean():.1%}"
+            frame, note = self.background.apply(frame, s)
 
         # Last, so the colour space view is purely cosmetic and never feeds back
-        # into what the detectors above measured.
+        # into what the model above measured.
         return to_color_space(frame, s.color_space), note
 
 
@@ -343,20 +290,15 @@ def _demo() -> None:
 
     # A zero kernel used to crash GaussianBlur; the clamp is what stops it.
     assert odd_kernel(0) == 1 and odd_kernel(4) == 5
-    edged, note = pipe.process(frame, replace(base, edges_on=True, blur_kernel=0))
-    assert "edges=" in note and "edges=0.0%" not in note, note
-    assert (edged == EDGE_COLOR).all(axis=2).any(), "the overlay must paint something"
 
-    # Edges-only replaces the picture rather than painting over it.
-    only, _ = pipe.process(frame, replace(base, edges_on=True, edges_only=True))
-    assert set(np.unique(only)) <= {0, 255}, "the edge map view must stay binary"
-
-    # A mask arrives single-channel: Canny must trace the blob's rim, not crash.
-    blob = np.zeros((64, 96), np.uint8)
-    blob[10:50, 20:70] = 255
-    rim = find_edges(blob, replace(base, blur_kernel=0))
-    assert rim[10, 20:70].any(), "the blob's top edge should be found"
-    assert not rim[30, 45], "the blob's interior is flat, so it is not an edge"
+    # Section A feeds the subtractor: what comes out of the Foreground view is
+    # the *adjusted* pixels behind the mask, never the raw ones. Comparing
+    # against adjust() directly is what pins that wiring down.
+    lit = replace(base, bgsub_on=True, mask_only=False, brightness=60, blur=5)
+    out = Pipeline().process(frame, lit)[0]
+    kept = out.any(axis=2)  # a fresh model calls everything foreground
+    assert kept.any(), "nothing survived the mask, so this proves nothing"
+    assert (out[kept] == adjust(frame, lit)[kept]).all(), "the model saw unadjusted pixels"
 
     # Background subtraction needs a few frames before it reports anything sane;
     # what matters here is that every model builds and both view modes come back.
