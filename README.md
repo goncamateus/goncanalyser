@@ -26,26 +26,29 @@ features/                  no Qt in here either
   texture.py               HOG and LBP (scikit-image)
   keypoints.py             SIFT and ORB
   structure.py             edges, Hough, corners, contours, blobs
-  report.py                JSON / CSV / overlay export
+  motion.py                heatmap, foreground, six motion algorithms — the one
+                           feature that spans frames, so the one with state
+  report.py                JSON / CSV / overlay / object-crop export
 ui/
   main_window.py           viewer left, tabs right, menu bar, transport
   dialogs.py               File menu: open, export, preferences
   controls/
     base.py                Knob, Section, Preview, and the widget factories
-    adjust.py globals.py local.py structures.py    one tab each
+    adjust.py globals.py local.py structures.py motion.py    one tab each
   viewer.py                the image label, plus the rubber-band region drag
 ```
 
 ## The window
 
-Viewer on the **left**, controls on the **right** in four tabs. The menu bar's
-`Image Adjustment | Global | Local | Structures` raise their tab rather than
+Viewer on the **left**, controls on the **right** in five tabs. The menu bar's
+`Image Adjustment | Global | Local | Structures | Motion` raise their tab rather than
 opening a second window — there is exactly one definition of every control, it is
 always one click away, and it never covers the image. `File` is the one menu
 that does open dialogs, because opening and exporting are one-shot questions.
 
 `View` under the image picks which stage is on screen: `Source`, `Grayscale`,
-`Threshold`, `Edges`, `Contour mask`, `HOG`, `LBP` or `Histogram`. Geometry
+`Threshold`, `Edges`, `Contour mask`, `Motion mask`, `Motion heatmap`, `HOG`,
+`LBP` or `Histogram`. Geometry
 overlays — keypoints, corners, contours, Hough lines, blobs — draw *on top* of
 whichever view you chose, so "Canny with SIFT keypoints over it" is just two
 controls. A view whose feature is switched off falls back to `Source` instead of
@@ -53,7 +56,7 @@ blanking.
 
 ## The chain
 
-    adjust -> structure -> keypoints -> texture -> colour
+    adjust -> motion -> structure -> keypoints -> texture -> colour
 
 One frame runs through once, and that single run feeds the viewer, the status bar
 and the export. Each feature writes into three collectors:
@@ -66,8 +69,9 @@ and the export. Each feature writes into three collectors:
 Splitting `ops` from `canvases` is what lets any overlay compose with any view
 without either feature knowing the other exists.
 
-Adding a feature means one module with a `run(frame, settings, out)` and one tab
-that declares its knobs. Nothing else changes — not the window, not the worker.
+Adding a feature means one module with a `run(frame, settings, out, state=None)`
+and one tab that declares its knobs. Nothing else changes — not the window, not
+the worker.
 
 ## Region of interest
 
@@ -104,6 +108,55 @@ finding wants a binary image and thresholding is how you get one. Set the
 threshold up first and use the `Threshold` view to see exactly what the contour
 finder is being handed.
 
+## Motion
+
+The **Motion** tab is the only one that measures the time axis, which makes it
+the only one with state behind it. Six algorithms, all reporting the same thing:
+
+| | |
+|---|---|
+| `MOG2`, `KNN` | statistical background model; adapts, so a plume that never moves eventually *becomes* background — that is what History and Learning rate are for |
+| `Farneback` | dense optical flow. The one to use when the shape of the moving thing matters |
+| `Lucas-Kanade` | sparse flow at tracked corners, each vector splatted as a disc. Fast, but a disc is not a segmentation |
+| `Frame difference` | the plain absolute difference |
+| `Three-frame difference` | the minimum of two consecutive differences, which drops the ghost a plain difference leaves *behind* the object |
+
+Whichever is selected, it produces a 0..255 motion image, and everything after
+that is shared: one **Sensitivity** threshold, one noise-removal kernel, one set
+of contours. So the knobs mean the same thing across all six and switching
+algorithm is not re-learning the panel. Optical flow is scaled on the way in —
+8 px/frame reads as full scale, `motion.FLOW_GAIN` if that needs calibrating.
+
+`Motion mask` is the extracted foreground, `Motion heatmap` is an exponential
+average of the motion over the last N frames, painted with `COLORMAP_JET` and
+weighted per pixel by its own heat, so cold areas stay as the frame instead of
+washing blue. Tick **Overlay** and it composites onto whichever view you are on,
+like any other overlay. Both are also thumbnails on the tab, next to the knobs
+that change them.
+
+Boxes carry area and pixels-per-frame speed, matched by nearest centroid between
+frames. That answers "how fast is something moving here", **not** "where did
+object 7 go" — there is no track identity, so two blobs that cross swap speeds.
+
+### The three state rules
+
+`MotionState` is owned by whoever drives the frames — the worker has one, an
+export has its own — and reset by three things, all of which happen in normal use:
+
+1. **The same frame twice does not advance it.** Dragging a knob while paused
+   re-analyses the frame on screen over and over; feeding a background model the
+   same image fifty times teaches it that image *is* the background, so a still
+   frame would fade to nothing while you tuned it. The thresholds stay live
+   though — only the carried state is pinned.
+2. **A seek or a backwards step resets it.** The previous frame is no longer the
+   previous frame, and differencing across the jump lights up the whole image.
+3. **A changed model resets it** — a different algorithm, or a resized region,
+   leaves a model of the wrong kind or the wrong shape.
+
+The region needs no special handling here: `adjust` crops before any feature
+runs, so the frame this module sees *is* the region and the heatmap is confined
+to it for free.
+
 ## What this OpenCV build can and cannot do
 
 Section D of the original spec asked for SIFT, SURF and ORB. **SIFT and ORB are
@@ -126,8 +179,11 @@ range — up always means more keypoints.
 
 HOG is the expensive thing: **150-300 ms a frame at 640x512**, slower than a
 video frame arrives. It runs on the worker thread so the window never freezes,
-but playback drops frames while it is on. It is off by default. Everything else
-is comfortably real-time.
+but playback drops frames while it is on. It is off by default.
+
+Dense optical flow (`Farneback`) is the next one down at **30-60 ms**; the other
+five motion algorithms are ~8 ms a frame at 640x512, comfortably real-time, as is
+everything else.
 
 The worker skips the whole chain when paused on a frame nobody re-tuned, and only
 converts a canvas to a QImage thumbnail when the tab showing it is actually
@@ -141,9 +197,12 @@ visible.
   the file because a metrics table without the parameters that produced it is not
   reproducible.
 * `metrics.csv` — one row per frame; `contours.csv`, `keypoints.csv`,
-  `blobs.csv`, `lines.csv`, `corners.csv`, `histogram.csv` — one row per object,
-  each carrying the frame it came from.
+  `blobs.csv`, `lines.csv`, `corners.csv`, `motion.csv`, `histogram.csv` — one
+  row per object, each carrying the frame it came from.
 * `overlays/frame_%06d.png` — the composited frames.
+* `objects/frame_%06d_%02d.png` — every moving object, cut out of the **raw**
+  frame rather than the composite, so what lands on disk is the object as the
+  camera saw it and not a picture of a box drawn round it.
 
 Rows are streamed, not accumulated: a 900-frame clip with SIFT on produces close
 to half a million keypoint rows, which would cost more memory than the video.
@@ -181,6 +240,7 @@ uv run python -m features.color     # known images have known histograms
 uv run python -m features.texture   # HOG length matches the geometry; noise beats flat
 uv run python -m features.keypoints # SIFT is 128-d, ORB is 32-byte, sensitivity monotonic
 uv run python -m features.structure # a synthetic square: 1 contour, 4 corners, 4 lines
+uv run python -m features.motion    # all six see a moving square and none see a still one
 uv run python -m features.report    # JSON and CSV round-trip, driven like ReportThread
 uv run python -m ui.viewer          # widget->image mapping, both letterbox orientations
 uv run python -m ui.controls.base   # groups are siblings; every Settings field has a knob

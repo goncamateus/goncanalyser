@@ -60,7 +60,7 @@ def plot(counts: np.ndarray, space: str, w: int = PLOT_W, h: int = PLOT_H) -> np
     return canvas
 
 
-def run(frame: np.ndarray, s: Settings, out) -> None:
+def run(frame: np.ndarray, s: Settings, out, state=None) -> None:
     counts = histograms(frame, s.hist_space)
     out.canvases["Histogram"] = plot(counts, s.hist_space)
 

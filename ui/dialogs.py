@@ -26,6 +26,7 @@ LABELS = {
     "json": "report.json — settings and per-frame metrics",
     "csv": "CSV tables — metrics.csv plus one file per object kind",
     "overlays": "overlays/ — the processed frames as PNG",
+    "objects": "objects/ — every moving object, cropped out of the source",
 }
 
 

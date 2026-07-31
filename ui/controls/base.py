@@ -7,7 +7,7 @@ Two pieces:
 * `Section` — a tab's worth of controls that emits one `changed` signal for *any*
             widget in it and knows how to report its own values as a dict.
 
-The dict is the whole contract with the main window: it merges the four tabs'
+The dict is the whole contract with the main window: it merges the five tabs'
 dicts into one `Settings` and hands it to the worker. Adding a knob therefore
 means touching exactly one file — the tab it belongs to.
 

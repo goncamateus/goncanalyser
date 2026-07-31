@@ -38,7 +38,7 @@ from core.settings import VIEWS, Settings, load_cached, save_cached
 from core.source import FrameSource, SourceError
 from core.worker import ReportThread, Worker
 
-from .controls import AdjustTab, GlobalTab, LocalTab, StructuresTab
+from .controls import AdjustTab, GlobalTab, LocalTab, MotionTab, StructuresTab
 from .dialogs import ExportDialog, PreferencesDialog, open_folder, open_source
 from .viewer import Viewer
 
@@ -51,6 +51,7 @@ TABS = (
     ("Global", "Global", GlobalTab),
     ("Local", "Local", LocalTab),
     ("Structures", "Structures", StructuresTab),
+    ("Motion", "Motion", MotionTab),
 )
 
 

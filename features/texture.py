@@ -49,7 +49,7 @@ def lbp_of(gray: np.ndarray, s: Settings) -> np.ndarray:
     )
 
 
-def run(frame: np.ndarray, s: Settings, out) -> None:
+def run(frame: np.ndarray, s: Settings, out, state=None) -> None:
     if not (s.hog_on or s.lbp_on):
         return
     gray = to_gray(frame)

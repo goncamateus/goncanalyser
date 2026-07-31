@@ -22,7 +22,9 @@ from core.pipeline import analyse, composite
 from core.settings import Settings
 from core.source import FrameSource
 
-FORMATS = ("json", "csv", "overlays")
+from .motion import MotionState
+
+FORMATS = ("json", "csv", "overlays", "objects")
 
 
 class _Tables:
@@ -54,6 +56,27 @@ class _Tables:
         return sorted(f"{k}.csv" for k in self.open)
 
 
+def _crops(raw, rows, out: Path, index: int) -> int:
+    """Every moving object in this frame, cut out of the source. Returns how many.
+
+    Cut from the *raw* frame rather than the composite, so what lands on disk is
+    the object as the camera saw it and not a picture of a box drawn round it.
+    The rows are already in full-frame coordinates by the time they get here —
+    `pipeline.analyse` translates them out of region space — so they index the
+    frame directly.
+    """
+    height, width = raw.shape[:2]
+    written = 0
+    for n, row in enumerate(rows):
+        x, y = max(0, int(row["x"])), max(0, int(row["y"]))
+        x2, y2 = min(width, x + int(row["w"])), min(height, y + int(row["h"]))
+        if x2 <= x or y2 <= y:
+            continue  # a box entirely off-frame is nothing to write
+        cv2.imwrite(str(out / f"frame_{index:06d}_{n:02d}.png"), raw[y:y2, x:x2])
+        written += 1
+    return written
+
+
 def write(path: str, s: Settings, out_dir: str, formats: tuple[str, ...]):
     """Generator yielding (done, total); returns a summary dict when exhausted."""
     source = FrameSource(path)
@@ -62,18 +85,26 @@ def write(path: str, s: Settings, out_dir: str, formats: tuple[str, ...]):
     overlay_dir = out / "overlays"
     if "overlays" in formats:
         overlay_dir.mkdir(exist_ok=True)
+    object_dir = out / "objects"
+    if "objects" in formats:
+        object_dir.mkdir(exist_ok=True)
 
     total = source.count
     tables = _Tables(out)
     summary: list[dict] = []
     written = []
+    crops = 0
+    # This run's own motion state. The loop below is strictly sequential, frame 0
+    # upwards, which is exactly what it wants — and it is a separate object from
+    # the viewer's, so exporting while the window plays disturbs neither.
+    state = MotionState()
 
     try:
         for index in range(total):
             raw = source.read(index)
             if raw is None:
                 break  # a truncated file is a normal thing to hand this
-            result = analyse(raw, s)
+            result = analyse(raw, s, state.at(index))
             summary.append({"frame": index, "name": source.name(index), **result.metrics})
 
             if "csv" in formats:
@@ -81,6 +112,8 @@ def write(path: str, s: Settings, out_dir: str, formats: tuple[str, ...]):
                     tables.add(kind, rows, index)
             if "overlays" in formats:
                 cv2.imwrite(str(overlay_dir / f"frame_{index:06d}.png"), composite(result, s))
+            if "objects" in formats:
+                crops += _crops(raw, result.rows.get("motion", ()), object_dir, index)
 
             yield index + 1, total
     finally:
@@ -109,6 +142,8 @@ def write(path: str, s: Settings, out_dir: str, formats: tuple[str, ...]):
 
     if "overlays" in formats:
         written.append(f"overlays/ ({len(summary)} png)")
+    if "objects" in formats:
+        written.append(f"objects/ ({crops} png)")
 
     return {"frames": len(summary), "dir": str(out), "written": written}
 
@@ -159,6 +194,26 @@ def _demo() -> None:
         overlays = sorted((dest / "overlays").glob("*.png"))
         assert len(overlays) == 3, overlays
         assert cv2.imread(str(overlays[0])).shape == (64, 64, 3)
+
+        # Motion spans frames, so the exporter has to carry a state of its own
+        # down the loop — without it every frame is frame one and nothing moves.
+        # Its own fixture: a square that actually travels, on a clean background,
+        # so the rows are the object and not a threshold's worth of speckle.
+        clip = Path(tmp) / "clip"
+        clip.mkdir()
+        for i in range(3):
+            img = np.zeros((64, 64, 3), np.uint8)
+            cv2.rectangle(img, (5 + i * 10, 20), (25 + i * 10, 40), (255, 255, 255), -1)
+            cv2.imwrite(str(clip / f"{i}.png"), img)
+
+        moving = Path(tmp) / "moving"
+        list(write(str(clip), Settings(motion_algo="Frame difference"), str(moving),
+                   ("csv", "objects")))
+        rows = list(csv.DictReader((moving / "motion.csv").open()))
+        assert rows and set(rows[0]) >= {"frame", "x", "y", "w", "h", "area", "speed"}
+        # Frame 0 has nothing to difference against; the ones after it do.
+        assert {r["frame"] for r in rows} <= {"1", "2"} and rows[0]["frame"] != "0"
+        assert list((moving / "objects").glob("*.png")), "no object crops written"
 
         # Asking for one format must not write the others.
         only = Path(tmp) / "json-only"

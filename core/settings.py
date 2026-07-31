@@ -23,6 +23,8 @@ VIEWS = (
     "Threshold",
     "Edges",
     "Contour mask",
+    "Motion mask",
+    "Motion heatmap",
     "HOG",
     "LBP",
     "Histogram",
@@ -116,6 +118,40 @@ class Settings:
     blob_circularity: float = 0.0  # 0 disables the filter
     blob_convexity: float = 0.0
     blob_dark: bool = True  # look for dark blobs on light, the OpenCV default
+
+    # --- Motion ---
+    # The only feature that reads more than one frame, so it is also the only one
+    # with state behind it — see `features.motion.MotionState`.
+    motion_algo: str = "None"  # None | MOG2 | KNN | Farneback | Lucas-Kanade | …
+    # Grey levels, and it means the same thing under all six algorithms: each one
+    # reports its motion as a 0..255 image before this cuts it into a mask.
+    motion_threshold: int = 25
+    motion_learning: float = -1.0  # MOG2/KNN adaptation rate; -1 = automatic
+    motion_open: int = 3  # morphological open kernel; 0 or 1 = off
+
+    mog_history: int = 500
+    mog_var: float = 16.0
+    mog_shadows: bool = True
+    knn_history: int = 500
+    knn_dist: float = 400.0
+    knn_shadows: bool = True
+
+    fb_pyr_scale: float = 0.5
+    fb_levels: int = 3
+    fb_winsize: int = 15
+    fb_iterations: int = 3
+    lk_max_points: int = 200
+    lk_win: int = 15
+
+    heat_on: bool = False  # paint the heatmap over whatever view is showing
+    heat_opacity: float = 0.5
+    heat_window: int = 20  # frames the heat is averaged over
+    heat_threshold: float = 0.05  # 0..1 of full scale; below this stays cold
+
+    motion_min_area: int = 50
+    motion_boxes: bool = True
+    motion_metrics: bool = False  # speed and area labels on every box
+    motion_max_travel: int = 60  # px/frame beyond which two blobs are not the same
 
 
 def cache_file() -> Path:

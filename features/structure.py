@@ -96,7 +96,7 @@ def blob_detector(s: Settings) -> cv2.SimpleBlobDetector:
     return cv2.SimpleBlobDetector.create(p)
 
 
-def run(frame: np.ndarray, s: Settings, out) -> None:
+def run(frame: np.ndarray, s: Settings, out, state=None) -> None:
     gray = to_gray(frame)
 
     if s.edge_kind != "None":

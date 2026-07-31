@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 import cv2
 import numpy as np
 
-from features import adjust, color, keypoints, structure, texture
+from features import adjust, color, keypoints, motion, structure, texture
 
 from .settings import VIEWS, Settings
 
@@ -49,9 +49,10 @@ class Result:
 
 
 # Fixed order. Adjust runs first and separately — it produces the frame the rest
-# read. Colour is last only because it is the one feature that reads the frame
-# and draws nothing on it.
-FEATURES = (structure, keypoints, texture, color)
+# read. Motion is next so its overlay ends up *under* the detectors' — a heatmap
+# painted last would bury every box drawn before it. Colour is last only because
+# it is the one feature that reads the frame and draws nothing on it.
+FEATURES = (motion, structure, keypoints, texture, color)
 
 
 # Row keys that hold a coordinate, so a region's results can be reported in frame
@@ -61,12 +62,19 @@ X_KEYS = ("x", "x1", "x2")
 Y_KEYS = ("y", "y1", "y2")
 
 
-def analyse(bgr: np.ndarray, s: Settings) -> Result:
-    """Run every enabled feature over one frame. No compositing, no drawing."""
+def analyse(bgr: np.ndarray, s: Settings, state=None) -> Result:
+    """Run every enabled feature over one frame. No compositing, no drawing.
+
+    `state` is a `motion.MotionState` belonging to whoever is driving the frames —
+    the one thing in the chain that cannot be recomputed from this frame alone.
+    Every feature takes it and only `motion` reads it, which keeps this loop a
+    single line and keeps the special case out of the middle of it. `None` means
+    "one frame, on its own", which is what every still-image caller means.
+    """
     out = Result()
     frame = adjust.run(bgr, s, out)
     for module in FEATURES:
-        module.run(frame, s, out)
+        module.run(frame, s, out, state)
 
     if out.roi is not None:
         # The features measured a cropped frame, so every coordinate they

@@ -84,7 +84,7 @@ def detect(gray: np.ndarray, s: Settings):
     return found, described
 
 
-def run(frame: np.ndarray, s: Settings, out) -> None:
+def run(frame: np.ndarray, s: Settings, out, state=None) -> None:
     if s.detector == "None":
         return
     found, described = detect(to_gray(frame), s)

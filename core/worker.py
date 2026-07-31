@@ -17,6 +17,8 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 
+from features.motion import MotionState
+
 from .pipeline import analyse, composite, summarise
 from .settings import Settings
 from .source import FrameSource
@@ -54,6 +56,10 @@ class Worker(QThread):
         # QImage every frame would be pure waste when nothing is looking at it.
         self.previews: tuple[str, ...] = ()
         self.playing = source.is_video
+        # The one piece of the chain that outlives a frame. Owned here rather
+        # than by the pipeline so a running export cannot share — and disturb —
+        # the background model the viewer is looking at.
+        self.motion = MotionState()
         self._running = True
         self._index = 0  # the frame being displayed
         self._seek: int | None = None
@@ -120,7 +126,9 @@ class Worker(QThread):
                 continue
 
             last_state = (s, previews)
-            result = analyse(raw, s)
+            # `at` names the frame, which is what lets the motion state tell a
+            # step forward from a seek from a paused re-render of the same frame.
+            result = analyse(raw, s, self.motion.at(self._index))
             canvas = composite(result, s)
 
             self.frame_ready.emit(to_qimage(canvas))
