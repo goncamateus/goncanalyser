@@ -97,9 +97,9 @@ class MainWindow(QMainWindow):
         self.sections = (self.basic, self.plume, self.labelling)
         # Pick up where the last session left off. Fields the file does not carry
         # keep the widget defaults, so an old cache survives a new knob.
-        # cached = load_cached()
-        # for section in self.sections:
-        #     section.restore(cached)
+        cached = load_cached()
+        for section in self.sections:
+            section.restore(cached)
         self.settings = self._collect()
 
         central = QWidget()
