@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self.view.currentIndexChanged.connect(self.push_settings)
 
         self.play_button = self._button("Pause", self.toggle_play)
+        _fix_width(self.play_button, "Play", "Pause")
         self.seek = QSlider(Qt.Orientation.Horizontal)
         self.seek.setRange(0, 0)
         self.seek.setEnabled(False)
@@ -432,3 +433,21 @@ def _muted(widget, action) -> None:
     widget.blockSignals(True)
     action()
     widget.blockSignals(False)
+
+
+def _fix_width(button: QPushButton, *texts: str) -> None:
+    """Pin a button to the widest label it will ever show.
+
+    A button whose text toggles — "Pause" to "Play" — otherwise resizes on every
+    press and shoves the rest of the transport bar sideways under it.
+
+    Measured by asking Qt for each label's `sizeHint` rather than hard-coding a
+    number, so it stays correct under a different font, DPI or platform style.
+    """
+    current = button.text()
+    widest = 0
+    for text in texts:
+        button.setText(text)
+        widest = max(widest, button.sizeHint().width())
+    button.setText(current)
+    button.setFixedWidth(widest)
