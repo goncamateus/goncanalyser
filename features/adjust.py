@@ -108,9 +108,59 @@ def threshold(gray: np.ndarray, s: Settings) -> np.ndarray:
     return cv2.adaptiveThreshold(gray, 255, method, cv2.THRESH_BINARY, block, 2)
 
 
+# A region smaller than this is not analysable: SIFT and ORB build a scale
+# pyramid and cv2.resize refuses a zero dimension, so a stray 1-px drag would
+# take the worker down. Sized in pixels, and small enough never to get in the way.
+MIN_ROI = 16
+
+
+def roi_rect(shape, s: Settings) -> tuple[int, int, int, int] | None:
+    """The selected rectangle, fitted to this frame. None when there is not one.
+
+    Fitted rather than trusted, in three ways, because all three happen in normal
+    use: a rectangle left over from a 1920x1080 clip has to mean something on a
+    640x512 one; a spinbox mid-edit holds a half-typed number; and a stray click
+    is a rectangle a few pixels wide.
+
+    So the size is clamped into `MIN_ROI..frame`, and then the origin is pulled
+    back far enough for it to fit. Sliding the rectangle in beats shrinking it to
+    a sliver, which is what a drag near the edge means anyway. When the frame
+    itself is under `MIN_ROI` the whole frame is the region.
+    """
+    if not s.roi_on:
+        return None
+    h, w = shape[:2]
+    cw = min(w, max(MIN_ROI, w if s.roi_w <= 0 else int(s.roi_w)))
+    ch = min(h, max(MIN_ROI, h if s.roi_h <= 0 else int(s.roi_h)))
+    x = min(max(0, int(s.roi_x)), w - cw)
+    y = min(max(0, int(s.roi_y)), h - ch)
+    return (x, y, cw, ch)
+
+
+def crop(bgr: np.ndarray, s: Settings) -> np.ndarray:
+    """The selected rectangle as its own array. A copy, never a view.
+
+    A view would let an overlay drawn on the region write straight through into
+    the full frame kept behind it as the display background.
+    """
+    rect = roi_rect(bgr.shape, s)
+    if rect is None:
+        return bgr
+    x, y, w, h = rect
+    return bgr[y : y + h, x : x + w].copy()
+
+
 def apply(bgr: np.ndarray, s: Settings) -> np.ndarray:
-    """The whole preprocessing chain. Always returns a 3-channel BGR-shaped array."""
-    out = bgr
+    """The whole preprocessing chain. Always returns a 3-channel BGR-shaped array.
+
+    The crop is **first**, and that ordering is the feature, not an optimisation.
+    Cropping last would be cheaper to wire up — the full adjusted frame would
+    then be free to use as the display background — but it leaks the surround
+    into the numbers two ways: Otsu picks its level from the histogram it is
+    given, and the blurs read a kernel's worth of neighbours across the border.
+    Both would make the result depend on pixels outside the rectangle.
+    """
+    out = crop(bgr, s)
     if s.contrast != 1.0 or s.brightness:
         out = cv2.convertScaleAbs(out, alpha=s.contrast, beta=s.brightness)
     if s.saturation != 1.0:
@@ -145,6 +195,13 @@ def run(bgr: np.ndarray, s: Settings, out) -> np.ndarray:
     you set it — that is exactly the frame the contour finder will see.
     """
     frame = apply(bgr, s)
+    out.roi = roi_rect(bgr.shape, s)
+    if out.roi is not None:
+        # The *raw* frame, deliberately unprocessed. It is the background the
+        # finished region gets pasted back into, and keeping it out of the
+        # analysis path entirely is what makes the isolation guarantee structural
+        # rather than something to remember.
+        out.canvases["Full"] = bgr
     out.canvases["Source"] = frame
     gray = to_gray(frame)
     out.canvases["Grayscale"] = to_bgr(gray)
@@ -187,6 +244,34 @@ def _demo() -> None:
 
     tuned = replace(base, brightness=20, contrast=1.5, saturation=1.2, gamma=0.8)
     assert apply(frame, tuned).shape == frame.shape
+
+    # --- region of interest ---
+    assert roi_rect(frame.shape, base) is None, "off means off"
+    # frame is 64 tall, 96 wide
+    roi = replace(base, roi_on=True, roi_x=10, roi_y=8, roi_w=40, roi_h=30)
+    assert roi_rect(frame.shape, roi) == (10, 8, 40, 30)
+    out = apply(frame, roi)
+    assert out.shape == (30, 40, 3), out.shape
+    assert (out == frame[8:38, 10:50]).all(), "the crop is not the rectangle asked for"
+
+    # 0 means out to the edge, so 0/0 is the whole frame.
+    assert roi_rect(frame.shape, replace(roi, roi_x=0, roi_y=0, roi_w=0, roi_h=0)) == (
+        0, 0, 96, 64,
+    )
+    assert (apply(frame, replace(roi, roi_x=0, roi_y=0, roi_w=0, roi_h=0)) == frame).all()
+
+    # A copy, not a view: an overlay drawn on the region must not reach through
+    # into the full frame kept behind it.
+    crop(frame, roi)[:] = 0
+    assert frame.any(), "crop returned a view into the caller's frame"
+
+    # Oversized, undersized and off-frame all resolve to something analysable.
+    assert roi_rect(frame.shape, replace(roi, roi_w=9000, roi_h=9000)) == (0, 0, 96, 64)
+    assert roi_rect(frame.shape, replace(roi, roi_x=95, roi_y=63, roi_w=1, roi_h=1)) == (
+        96 - MIN_ROI, 64 - MIN_ROI, MIN_ROI, MIN_ROI,
+    )
+    tiny = np.zeros((8, 8, 3), np.uint8)  # frame smaller than MIN_ROI
+    assert roi_rect(tiny.shape, roi) == (0, 0, 8, 8)
 
     print("adjust ok")
 

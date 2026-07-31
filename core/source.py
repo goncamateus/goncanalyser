@@ -72,6 +72,22 @@ class FrameSource:
         fps = self.capture.get(cv2.CAP_PROP_FPS)
         return fps if fps and fps > 1 else 0.0
 
+    @property
+    def size(self) -> tuple[int, int]:
+        """(width, height) in pixels, or (0, 0) if that cannot be established.
+
+        Asked for directly rather than inferred from a painted frame, because the
+        Histogram view paints a 512x256 plot instead of the frame and would give
+        the wrong answer. Video reports its own dimensions without decoding
+        anything; a folder has to read its first image.
+        """
+        if self.capture is not None:
+            w = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            return (max(0, w), max(0, h))
+        first = self.read(0)
+        return (0, 0) if first is None else (first.shape[1], first.shape[0])
+
     def name(self, index: int) -> str:
         """A label for this frame — the file name for stills, the number for video."""
         if self.capture is None:
@@ -114,6 +130,7 @@ def _demo() -> None:
 
         folder = FrameSource(str(root))
         assert folder.count == 5 and not folder.is_video and folder.fps == 0.0
+        assert folder.size == (48, 32), folder.size
         assert folder.read(0).shape == (32, 48, 3)
         assert folder.read(4) is not None and folder.read(5) is None
         assert folder.name(0) == "f00.png"
@@ -134,6 +151,8 @@ def _demo() -> None:
         clip = FrameSource(str(video_path))
         assert clip.is_video and clip.fps == 10.0, clip.fps
         assert clip.count == 5, clip.count
+        # Reported by the container, so asking must not disturb the read position.
+        assert clip.size == (48, 32), clip.size
         assert clip.read(0).shape == (32, 48, 3)
         # Sequential reads take the fast path; the seek back must still work.
         assert clip.read(1) is not None and clip.read(2) is not None

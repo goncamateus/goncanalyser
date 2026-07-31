@@ -47,6 +47,16 @@ class Settings:
     threshold: int = 127
     adaptive_block: int = 11  # neighbourhood for the two adaptive modes; odd, >= 3
 
+    # --- Image Adjustment: region of interest ---
+    # Everything downstream sees only this rectangle. `0` for width or height
+    # means "out to the edge", which keeps the frame size out of Settings — it
+    # would otherwise have to be kept in step with whatever source is open.
+    roi_on: bool = False
+    roi_x: int = 0
+    roi_y: int = 0
+    roi_w: int = 0
+    roi_h: int = 0
+
     # --- Global: colour ---
     hist_space: str = "RGB"  # RGB | HSV | LAB
 

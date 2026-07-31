@@ -48,4 +48,30 @@ class AdjustTab(Section):
             "<i>Threshold</i> to see exactly what it is being handed."
         )
 
+        self.group("Selection")
+        self.enabled = self.check("Limit analysis to a region", field="roi_on")
+        self.draw = self.button("Draw region on the image", lambda: None)
+        self.x = self.spin("X", tip="left edge, px", field="roi_x")
+        self.y = self.spin("Y", tip="top edge, px", field="roi_y")
+        self.w = self.spin("W", tip="0 = out to the right edge", field="roi_w")
+        self.h = self.spin("H", tip="0 = out to the bottom edge", field="roi_h")
+        self.button("Reset to the full frame", self.reset_region)
+        self.note(
+            "Everything is measured <b>inside the rectangle only</b> — the frame "
+            "around it stays on screen as context and never reaches the numbers. "
+            "Arrows step by 10; <b>0</b> for W or H means out to the edge.<br><br>"
+            "Exported coordinates are translated back to full-frame pixels, so a "
+            "CSV means the same thing with a region as without one."
+        )
+
         self.stretch()
+
+    def reset_region(self) -> None:
+        """Back to the whole frame, without disturbing the other three tabs."""
+        for spin in (self.x, self.y, self.w, self.h):
+            spin.setValue(0)
+
+    def set_frame_size(self, width: int, height: int) -> None:
+        """Cap the boxes at the source's dimensions, so a rect cannot be typed off-frame."""
+        for spin, limit in ((self.x, width), (self.y, height), (self.w, width), (self.h, height)):
+            spin.setMaximum(max(0, limit))

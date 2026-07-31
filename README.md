@@ -31,8 +31,9 @@ ui/
   main_window.py           viewer left, tabs right, menu bar, transport
   dialogs.py               File menu: open, export, preferences
   controls/
-    base.py                Knob, Section, Preview
+    base.py                Knob, Section, Preview, and the widget factories
     adjust.py globals.py local.py structures.py    one tab each
+  viewer.py                the image label, plus the rubber-band region drag
 ```
 
 ## The window
@@ -67,6 +68,30 @@ without either feature knowing the other exists.
 
 Adding a feature means one module with a `run(frame, settings, out)` and one tab
 that declares its knobs. Nothing else changes — not the window, not the worker.
+
+## Region of interest
+
+**Image Adjustment → Selection** limits every analysis to a rectangle. Drag it on
+the image with the **Draw** button, or type it into the four spinboxes (arrows
+step by 10; `0` for W or H means out to the edge). The two stay in sync.
+
+The frame around the rectangle stays on screen as context and **never reaches the
+numbers**. That guarantee is why the crop happens *first* in the chain rather
+than last, which would have been easier to wire up: `Otsu` picks its level from
+whatever histogram it is given, and a blur reads a kernel's worth of neighbours
+across the border, so cropping afterwards would let the surround set the
+threshold and bleed over the edge. The background you see is the raw decoded
+frame, never processed, so it cannot leak by construction.
+
+`core.pipeline`'s check pins this down — it analyses a region, blanks every pixel
+outside it, re-analyses, and asserts the metrics are byte-identical, with Otsu
+and a blur switched on because those are the two operators that leak.
+
+Exported coordinates are translated back to full-frame pixels, so a CSV means the
+same thing with a region as without one.
+
+It is also the cheap way to make the expensive features usable: SIFT + HOG over a
+full 640x512 frame is **202 ms**; over a 200x160 region, **21 ms**.
 
 ## Preprocessing is not cosmetic
 
@@ -157,5 +182,6 @@ uv run python -m features.texture   # HOG length matches the geometry; noise bea
 uv run python -m features.keypoints # SIFT is 128-d, ORB is 32-byte, sensitivity monotonic
 uv run python -m features.structure # a synthetic square: 1 contour, 4 corners, 4 lines
 uv run python -m features.report    # JSON and CSV round-trip, driven like ReportThread
+uv run python -m ui.viewer          # widget->image mapping, both letterbox orientations
 uv run python -m ui.controls.base   # groups are siblings; every Settings field has a knob
 ```

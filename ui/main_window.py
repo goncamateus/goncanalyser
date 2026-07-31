@@ -17,7 +17,7 @@ adding a control never means adding a connection here.
 
 from dataclasses import asdict
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -40,6 +40,7 @@ from core.worker import ReportThread, Worker
 
 from .controls import AdjustTab, GlobalTab, LocalTab, StructuresTab
 from .dialogs import ExportDialog, PreferencesDialog, open_folder, open_source
+from .viewer import Viewer
 
 PANEL_WIDTH = 400
 
@@ -99,6 +100,13 @@ class MainWindow(QMainWindow):
             section.changed.connect(self.push_settings)
         self.tabs.currentChanged.connect(self.push_previews)
 
+        # The Selection group lives on the Adjust tab but needs the viewer, which
+        # the tab has no business knowing about — so the window connects them.
+        self.adjust = self.sections[0]
+        self.adjust.draw.clicked.connect(self.arm_draw)
+        self.view.currentIndexChanged.connect(self.refresh_draw)
+        self.on_source_changed()
+
         for keys, slot in (
             ("Space", self.toggle_play),
             (".", lambda: self.step(+1)),
@@ -124,10 +132,8 @@ class MainWindow(QMainWindow):
 
     def _viewer(self) -> QWidget:
         """Image on top, view picker and transport bar underneath."""
-        self.video = QLabel("waiting for the first frame…")
-        self.video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video.setMinimumSize(640, 360)
-        self.video.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.video = Viewer()
+        self.video.selected.connect(self.on_region_drawn)
 
         # `self.view` is the one control that does not belong to a tab — it
         # decides which tab's output is on screen, so it sits with the image.
@@ -195,6 +201,49 @@ class MainWindow(QMainWindow):
             action = QAction(title, self)
             action.triggered.connect(lambda _=False, i=index: self.tabs.setCurrentIndex(i))
             bar.addAction(action)
+
+    # --- region of interest -------------------------------------------------
+
+    def on_source_changed(self) -> None:
+        """Tell the viewer and the spinboxes how big the frames are.
+
+        From the source rather than from a painted frame: the Histogram view
+        paints a 512x256 plot, which would cap the boxes at the size of a chart.
+        """
+        width, height = self.source.size
+        self.video.source_size = QSize(width, height)
+        self.adjust.set_frame_size(width, height)
+        self.refresh_draw()
+
+    def arm_draw(self) -> None:
+        self.video.arm(True)
+        self.statusBar().showMessage("drag a rectangle on the image")
+
+    def refresh_draw(self) -> None:
+        """Drawing is meaningless over the Histogram — that is a plot, not the frame."""
+        on_frame = self.view.currentText() != "Histogram"
+        self.adjust.draw.setEnabled(on_frame and not self.source.size == (0, 0))
+        self.adjust.draw.setToolTip(
+            "" if on_frame else "switch off the Histogram view to draw on the frame"
+        )
+        if not on_frame:
+            self.video.arm(False)
+
+    def on_region_drawn(self, x: int, y: int, w: int, h: int) -> None:
+        """A drag finished. Fill the four boxes and switch the region on.
+
+        Muted, then one push: writing four spinboxes would otherwise rebuild and
+        re-send Settings four times, and the worker would render three frames
+        nobody asked for.
+        """
+        for spin, value in (
+            (self.adjust.x, x), (self.adjust.y, y),
+            (self.adjust.w, w), (self.adjust.h, h),
+        ):
+            _muted(spin, lambda s=spin, v=value: s.setValue(v))
+        _muted(self.adjust.enabled, lambda: self.adjust.enabled.setChecked(True))
+        self.push_settings()
+        self.statusBar().showMessage(f"region {x}, {y}  {w}x{h}")
 
     # --- settings -----------------------------------------------------------
 
@@ -288,6 +337,7 @@ class MainWindow(QMainWindow):
         self.source.release()
         self.source = source
         self.setWindowTitle(f"Analyser — {path}")
+        self.on_source_changed()
         self.worker = self._start_worker()
         self.push_previews()
 
@@ -360,13 +410,7 @@ class MainWindow(QMainWindow):
     # --- painting -----------------------------------------------------------
 
     def show_frame(self, image: QImage) -> None:
-        self.video.setPixmap(
-            QPixmap.fromImage(image).scaled(
-                self.video.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        self.video.show_image(image)
 
     def show_preview(self, name: str, image: QImage) -> None:
         self.sections[self.tabs.currentIndex()].show_preview(name, image)

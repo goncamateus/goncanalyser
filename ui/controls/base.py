@@ -23,9 +23,11 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -153,6 +155,39 @@ class Section(QWidget):
         widget.toggled.connect(self.changed)
         return self._add(widget, field, "check")
 
+    def spin(
+        self,
+        name: str,
+        lo: int = 0,
+        hi: int = 10_000,
+        value: int = 0,
+        step: int = 10,
+        tip: str = "",
+        field: str = "",
+    ) -> QSpinBox:
+        """A labelled number box with up/down arrows. For values you want to type.
+
+        A slider is right for a knob you sweep looking for an effect; a pixel
+        coordinate is a number you know, or nudge one step at a time.
+        """
+        widget = QSpinBox()
+        widget.setRange(lo, hi)
+        widget.setSingleStep(step)
+        widget.setValue(value)
+        if tip:
+            widget.setToolTip(tip)
+        widget.valueChanged.connect(self.changed)
+
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel(name))
+        layout.addWidget(widget, 1)
+        self._column.addWidget(row)
+        if field:
+            self._fields[field] = (widget, "spin", None, None)
+        return widget
+
     def button(self, text: str, slot) -> QPushButton:
         """An action button. Its slot is its own — it does not report `changed`."""
         widget = QPushButton(text)
@@ -179,7 +214,7 @@ class Section(QWidget):
         for field, (widget, kind, cast, _) in self._fields.items():
             raw = (
                 widget.value()
-                if kind == "knob"
+                if kind in ("knob", "spin")
                 else widget.isChecked()
                 if kind == "check"
                 else widget.currentText()
@@ -203,6 +238,9 @@ class Section(QWidget):
                 value = back(data[field]) if back else data[field]
                 if kind == "knob":
                     widget.set_value(float(value))
+                elif kind == "spin":
+                    # QSpinBox has setValue, not the Knob's set_value.
+                    widget.setValue(int(value))
                 elif kind == "check":
                     widget.setChecked(bool(value))
                 else:
