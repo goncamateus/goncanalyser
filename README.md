@@ -1,161 +1,160 @@
-# video-tuner
+# analyser
 
-A Qt front end for tuning OpenCV operations against a video file, live. Pick a
-clip, drag sliders, watch the result at playback speed.
+A Qt workspace for looking at what OpenCV sees. Load an image, a folder or a
+video; stack preprocessing; switch on colour, texture, keypoint or structural
+extractors; watch the result at playback speed; export the numbers.
 
 ```bash
-uv run python main.py            # opens a file dialog
-uv run python main.py clip.mp4   # skips the dialog
+uv run python main.py               # opens a file dialog
+uv run python main.py clip.mp4      # a video
+uv run python main.py frames/       # a folder of images
+uv run python main.py shot.png      # one image
 ```
 
 ## Layout
 
 ```
-main.py                     entry point: file dialog, then the window
-gui/
-  main_window.py            layout, transport, panel <-> worker wiring
+main.py                    entry point: pick a source, then the window
+core/
+  settings.py              Settings — every knob as one frozen dataclass — and its cache
+  pipeline.py              the frame chain. No Qt, importable on its own
+  source.py                FrameSource: video / folder / single image, one interface
+  worker.py                Worker QThread and ReportThread
+features/                  no Qt in here either
+  adjust.py                preprocessing, plus the shared kernel/colour helpers
+  color.py                 RGB/HSV/LAB histograms, drawn with cv2.polylines
+  texture.py               HOG and LBP (scikit-image)
+  keypoints.py             SIFT and ORB
+  structure.py             edges, Hough, corners, contours, blobs
+  report.py                JSON / CSV / overlay export
+ui/
+  main_window.py           viewer left, tabs right, menu bar, transport
+  dialogs.py               File menu: open, export, preferences
   controls/
-    base.py                 Knob (slider + readout) and the Section base class
-    basic.py                A: brightness / contrast / saturation / gamma / blur / colour space
-    plume.py                B: source finding, then the plume grown out of it
-    labelling.py            C: label counts, key legend, export button
-processing/
-  video_thread.py           QThread: decode, process, emit QImages; plus ExportThread
-  pipeline.py               the OpenCV chain -- no Qt, importable on its own
-  plume.py                  single-frame steam plume segmentation
-  tracking.py               Kalman + association, to stop the detections flickering
-  labels.py                 which detection is the real plume, per frame
-  coco.py                   one-class COCO segmentation export
+    base.py                Knob, Section, Preview
+    adjust.py globals.py local.py structures.py    one tab each
 ```
 
-## Frame chain
+## The window
 
-    raw frame -> adjustments -> plume detection -> colour space
+Viewer on the **left**, controls on the **right** in four tabs. The menu bar's
+`Image Adjustment | Global | Local | Structures` raise their tab rather than
+opening a second window — there is exactly one definition of every control, it is
+always one click away, and it never covers the image. `File` is the one menu
+that does open dialogs, because opening and exporting are one-shot questions.
 
-Section A is not cosmetic: the detector reads the frame it produces, and every
-threshold in Section B is a *percentile of that frame's histogram*. Brightness,
-contrast and gamma move the histogram, so settle Section A first, then calibrate
-Section B, then leave A alone. The colour space conversion happens last and is
-the one genuinely cosmetic stage.
+`View` under the image picks which stage is on screen: `Source`, `Grayscale`,
+`Threshold`, `Edges`, `Contour mask`, `HOG`, `LBP` or `Histogram`. Geometry
+overlays — keypoints, corners, contours, Hough lines, blobs — draw *on top* of
+whichever view you chose, so "Canny with SIFT keypoints over it" is just two
+controls. A view whose feature is switched off falls back to `Source` instead of
+blanking.
 
-## Tracking
+## The chain
 
-The raw detector is per-frame and unstable: measured over 60 consecutive frames of
-`voo_1.mp4`, it changed how many sources it found on **36 of 59** transitions,
-swinging between 2 and 5 as the hot equipment blinked in and out. A Kalman filter
-alone does not fix that -- a filter smooths a signal it is given, and the problem
-is the signal disappearing. So `tracking.py` is the usual three parts:
+    adjust -> structure -> keypoints -> texture -> colour
 
-* **associate** each frame's detections to existing tracks by distance
-* **coast** an unmatched track for `max_age` frames before dropping it, which
-  bridges a 1-2 frame dropout; its last mask is redrawn, shifted by the filter's
-  predicted motion so it keeps up with the drone
-* **confirm** a new track only after `min_hits` detections, so a one-frame speck
-  never reaches the screen
+One frame runs through once, and that single run feeds the viewer, the status bar
+and the export. Each feature writes into three collectors:
 
-The filter is constant-velocity over `[cx, cy, w, h]`. Velocity is what makes
-coasting worth anything -- a plume drifts and the drone moves, so a coasted track
-has to keep moving or the next association fails anyway.
+* **canvases** — whole-frame images it can offer as *the* view.
+* **ops** — callables that paint geometry onto whichever canvas was picked.
+* **metrics** / **rows** — the numbers. `metrics` are per-frame scalars for the
+  status bar; `rows` are per-object (one per contour, keypoint, blob) for CSV.
 
-Result on the same 60 frames: count changes **36 -> 12**, at 23 -> 26 ms/frame.
-The status bar shows `plumes=4(3)` when the two disagree, so a held-through
-dropout is visible rather than silent.
+Splitting `ops` from `canvases` is what lets any overlay compose with any view
+without either feature knowing the other exists.
 
-This is the only stateful thing in the chain, which costs two guarantees worth
-knowing about. Track state belongs to a *contiguous* run of frames, so any seek
-throws it away. And re-rendering a frame must not step the filter -- dragging a
-slider re-runs the chain many times a second on the same frame -- so the state
-from before the current frame is kept and restored on a repeat. A paused frame
-therefore renders identically however many times it is redrawn.
+Adding a feature means one module with a `run(frame, settings, out)` and one tab
+that declares its knobs. Nothing else changes — not the window, not the worker.
 
-## Labelling and export
+## Preprocessing is not cosmetic
 
-The detector cannot separate a plume from hot dithered equipment (see the known
-limit below), so the last step is a human. Step through the clip and press the
-digit matching the `#N` drawn on the plume; `N` marks a frame as having no plume
-at all, `U` undoes. The pick is acknowledged on screen -- the chosen outline goes
-yellow and its label gains `OK`.
+The Image Adjustment tab runs *before* everything else, colour space included.
+Edges, keypoints and texture all measure the frame it produces, so switching to
+LAB genuinely changes what SIFT sees. That is the point.
 
-A pick is stored as **a point in the image**, not as the number you pressed.
-Indices belong to the current parameters: nudge a percentile, a source appears,
-and every index after it shifts. An anchor belongs to the scene, so re-tuning
-re-binds each label to whichever detection is now nearest instead of silently
-relabelling the wrong blob. A pick whose plume no longer exists is reported
-*lost* rather than guessed at, and is left out of the export.
+Contours specifically read the **Threshold** image, not the edge map — contour
+finding wants a binary image and thresholding is how you get one. Set the
+threshold up first and use the `Threshold` view to see exactly what the contour
+finder is being handed.
 
-Labels live beside the settings cache, one file per video, written on every
-keystroke rather than at quit.
+## What this OpenCV build can and cannot do
 
-Export warms the tracker up by decoding the frames before each labelled one, so
-the exported mask is the one that was on screen when the pick was made -- including
-on a frame where the plume was being coasted through a dropout.
+Section D of the original spec asked for SIFT, SURF and ORB. **SIFT and ORB are
+shipped; SURF is not, and neither are the usual substitutes:**
 
-**Export COCO dataset…** writes `images/frame_%06d.png` plus
-`annotations/instances.json`. One category, `plume`, covering halo and core as a
-single outline -- there is no separate core or source class. One annotation per
-image, whose `segmentation` is a list of polygons when the mask is in several
-pieces. Rejected frames export as an image with no annotation, which is a genuine
-negative sample. The image written is the **raw** decoded frame: Section A's
-adjustments are tuning aids for the detector, not part of the data.
+* **SURF** is patented, lives behind `OPENCV_ENABLE_NONFREE`, and no published
+  wheel sets it — not even `opencv-contrib-python`. It needs a source build.
+* **AKAZE, BRISK and KAZE** are absent from the `opencv-python` 5.0 Python
+  bindings entirely (`cv2.AKAZE` does not exist).
+* **ALIKED and DISK**, which 5.0 adds in their place, require ONNX model files
+  that are not bundled.
+
+So the Local tab offers the two that work: SIFT (128-d float, slow, more
+discriminative) and ORB (32-byte binary, fast enough for video). Their native
+thresholds are on different scales, so the panel exposes one normalised
+**Sensitivity** knob and `keypoints.SENSITIVITY` holds each detector's real
+range — up always means more keypoints.
+
+## Speed
+
+HOG is the expensive thing: **150-300 ms a frame at 640x512**, slower than a
+video frame arrives. It runs on the worker thread so the window never freezes,
+but playback drops frames while it is on. It is off by default. Everything else
+is comfortably real-time.
+
+The worker skips the whole chain when paused on a frame nobody re-tuned, and only
+converts a canvas to a QImage thumbnail when the tab showing it is actually
+visible.
+
+## Export
+
+**File → Export analysis…** re-runs the chain over every frame and writes any of:
+
+* `report.json` — the full `Settings` plus per-frame metrics. The settings are in
+  the file because a metrics table without the parameters that produced it is not
+  reproducible.
+* `metrics.csv` — one row per frame; `contours.csv`, `keypoints.csv`,
+  `blobs.csv`, `lines.csv`, `corners.csv`, `histogram.csv` — one row per object,
+  each carrying the frame it came from.
+* `overlays/frame_%06d.png` — the composited frames.
+
+Rows are streamed, not accumulated: a 900-frame clip with SIFT on produces close
+to half a million keypoint rows, which would cost more memory than the video.
 
 ## Settings cache
 
-The panel's state is written on quit and restored on the next launch, to the
-per-platform config directory Qt nominates (`~/Library/Preferences/video-tuner/`
-on macOS, `~/.config/video-tuner/` on Linux). Delete `settings.json` there to get
-the defaults back. A missing or corrupt file is ignored rather than fatal, and a
-cache written before a knob existed still loads — the missing field keeps its
-default.
-
-## Plume detection
-
-Ported from this repo's earlier `steamdet/plume.py` (`git show 9fdd3dd^:steamdet/plume.py`)
-with the temporal half removed. The original ANDed three cues -- hot, textured
-and *moving* -- and got the motion term by aligning neighbouring frames. Camera
-motion compensation never earned its cost on drone footage, so this keeps the two
-cues that need only the frame in front of you:
-
-* **Temperature.** The clip is not radiometric -- the camera baked a colormap in
-  -- but HLS lightness rises monotonically along that palette, so `L` is a
-  temperature proxy (r = 0.96 against a full inverse-LUT reconstruction). Every
-  threshold is a percentile, never a grey level, because the camera runs AGC.
-  Which channel gets measured is Section A's colour space: each one hands the
-  detector its lightness-like channel (HLS/LAB `L`, HSV `V`, or grey), and
-  `Default (BGR)` leaves the picture alone while measuring HLS lightness.
-* **Texture.** Above the top of the palette the sensor dithers, so the hottest
-  things come out speckled rather than flat. High local sigma is the signature.
-* **Geometry.** Plumes rise, so each source's search region runs from its own
-  base upward. That one line keeps hot ground and vehicles out of the mask.
-
-Detection is two stages, and the panel is grouped the same way: find the vents
-(hot **and** dithered), then grow a plume out of each one by hysteresis -- keep
-the blobs containing a core pixel, then walk outward through saturated pixels and
-finally a few steps into the cooler halo. Masks carry `0 = background, 1 = halo,
-2 = core`, so one array holds both extents. ~30-60 ms/frame at 640x512.
-
-**Known limit.** Texture does not separate the plume from hot dithered equipment
-on `voo_1.mp4` -- measured at the native 640x512, plume sigma averages 24.2 and
-the hot equipment 25.1. Both sit at the top of the palette and both dither. The
-motion cue is what used to reject static hot metal; without it, expect the plant's
-hot surfaces among the detections and use `p_src`, `Source min area` and the
-search margin to cut them down.## Threading
-
-`VideoThread` owns the capture and the pipeline. The GUI sends it settings by
-rebinding one frozen dataclass (atomic, no lock) and gets finished QImages back
-through signals, so decoding never blocks the widgets.
+Written on quit, restored on the next launch, in the per-platform config
+directory Qt nominates (`~/Library/Preferences/analyser/` on macOS,
+`~/.config/analyser/` on Linux). A missing or corrupt file is ignored rather
+than fatal, and a cache written before a knob existed still loads — the missing
+field keeps its default. **File → Preferences** shows the path and resets
+everything.
 
 ## Keys
 
-`space` play/pause . `.` step forward . `,` step back
+`space` play/pause · `.` step forward · `,` step back · `Ctrl+O` open ·
+`Ctrl+Shift+O` open folder · `Ctrl+E` export · `Ctrl+R` reset all controls
+
+`Ctrl+R` does not ask for confirmation — a shortcut that stops to ask is not
+worth having. It stashes the previous values instead, so pressing it again puts
+them back, and it keeps toggling between defaults and your last tuning. That
+doubles as an A/B compare.
 
 ## Check
 
+Every module carries a runnable self-check:
+
 ```bash
-uv run python -m processing.pipeline   # asserts the chain over every toggle
-uv run python -m processing.plume      # asserts a synthetic vent is found and
-                                       # a smooth hot slab is not
-uv run python -m processing.labels     # asserts picks survive re-tuning
-uv run python -m processing.coco       # asserts the COCO schema by hand
-uv run python -m processing.tracking   # asserts a dropout is bridged and a
-                                       # jittering centre is smoothed
+uv run python -m core.settings      # (no check — data only)
+uv run python -m core.source        # video, folder and single image all read frame 0
+uv run python -m core.pipeline      # the chain survives every view and every toggle
+uv run python -m features.adjust    # identity is byte-exact; every threshold is binary
+uv run python -m features.color     # known images have known histograms
+uv run python -m features.texture   # HOG length matches the geometry; noise beats flat
+uv run python -m features.keypoints # SIFT is 128-d, ORB is 32-byte, sensitivity monotonic
+uv run python -m features.structure # a synthetic square: 1 contour, 4 corners, 4 lines
+uv run python -m features.report    # JSON and CSV round-trip, driven like ReportThread
+uv run python -m ui.controls.base   # groups are siblings; every Settings field has a knob
 ```
