@@ -1,16 +1,17 @@
 [project]
-name = "video-tuner"
-version = "0.2.0"
-description = "Qt video player with live OpenCV tuning: adjustments, contours, background subtraction"
+name = "analyser"
+version = "0.3.0"
+description = "Qt workspace for live OpenCV feature analysis: adjustments, colour, texture, keypoints, structures"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "numpy>=2.0",
     "opencv-python>=4.10",
     "pyqt6>=6.7",
+    "scikit-image>=0.24",
 ]
 
 [project.scripts]
-video-tuner = "main:main"
+analyser = "main:main"
 
 [dependency-groups]
 dev = ["pytest"]
@@ -19,7 +20,7 @@ dev = ["pytest"]
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["gui*", "processing*"]
+include = ["core*", "features*", "ui*"]
 
 [build-system]
 requires = ["setuptools"]
