@@ -135,7 +135,8 @@ everything.
 ## Keys
 
 `space` play/pause · `.` step forward · `,` step back · `Ctrl+O` open ·
-`Ctrl+Shift+O` open folder · `Ctrl+E` export · `Ctrl+R` reset all controls
+`Ctrl+Shift+O` open folder · `Ctrl+E` export · `Ctrl+R` reset all controls ·
+`Ctrl+W` close (`⌘W` on macOS, where Qt maps Ctrl onto Command)
 
 `Ctrl+R` does not ask for confirmation — a shortcut that stops to ask is not
 worth having. It stashes the previous values instead, so pressing it again puts

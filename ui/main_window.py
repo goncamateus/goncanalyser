@@ -170,12 +170,18 @@ class MainWindow(QMainWindow):
     def _menus(self) -> None:
         bar = self.menuBar()
         files = bar.addMenu("File")
+        # "Ctrl+…" is the portable spelling, not a Windows-ism: Qt maps Ctrl in a
+        # QKeySequence onto Command on macOS, so these are Cmd+W and Cmd+Q there
+        # and Ctrl+W and Ctrl+Q everywhere else. QKeySequence.StandardKey.Close
+        # would *not* do — outside macOS it means Ctrl+F4, which is the MDI
+        # close-child binding and not what anyone reaches for.
         for text, keys, slot in (
             ("Open image or video…", "Ctrl+O", self.open_file),
             ("Open image folder…", "Ctrl+Shift+O", self.open_dir),
             ("Export analysis…", "Ctrl+E", self.export),
             ("Reset all controls", "Ctrl+R", self.reset_settings),
             ("Preferences…", "Ctrl+,", self.preferences),
+            ("Close window", "Ctrl+W", self.close),
             ("Quit", "Ctrl+Q", self.close),
         ):
             action = QAction(text, self)
