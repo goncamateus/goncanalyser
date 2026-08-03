@@ -41,12 +41,15 @@ def hog_of(gray: np.ndarray, s: Settings) -> tuple[np.ndarray, np.ndarray]:
 
 def lbp_of(gray: np.ndarray, s: Settings) -> np.ndarray:
     """LBP codes as a float array, in whatever range the method produces."""
-    return local_binary_pattern(
+    codes = local_binary_pattern(
         gray,
         P=max(1, int(s.lbp_points)),
         R=max(1, int(s.lbp_radius)),
         method=s.lbp_method,
     )
+    # "var" is NaN wherever the neighbourhood variance is undefined — on the
+    # border, and on flat patches. Zero is the honest value there: no variation.
+    return np.nan_to_num(codes)
 
 
 def run(frame: np.ndarray, s: Settings, out, state=None) -> None:
@@ -101,13 +104,18 @@ def _demo() -> None:
     # "uniform" is defined to produce codes in 0..P+1 and nothing outside it.
     codes = lbp_of(noise, base)
     assert codes.min() >= 0 and codes.max() <= base.lbp_points + 1, (codes.min(), codes.max())
-    for method in LBP_METHODS:
-        assert lbp_of(flat, replace(base, lbp_method=method)).shape == flat.shape, method
-
     def measure(img, s=base):
         out = Result()
         run(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), s, out)
         return out
+
+    # Every method on a flat image: "var" is NaN there, which used to crash the
+    # histogram and the display cast.
+    for method in LBP_METHODS:
+        s = replace(base, lbp_method=method)
+        assert lbp_of(flat, s).shape == flat.shape, method
+        assert np.isfinite(lbp_of(flat, s)).all(), method
+        assert measure(flat, s).metrics["lbp_bins"] >= 1, method
 
     busy, plain = measure(noise), measure(flat)
     assert busy.metrics["lbp_entropy"] > plain.metrics["lbp_entropy"], "noise must be busier"
