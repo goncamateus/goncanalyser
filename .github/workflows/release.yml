@@ -1,8 +1,10 @@
 name: release
 
-# Windows and macOS installers cannot be cross-built from Linux, so this workflow is the
-# only way they get produced. Push a tag to cut a release; run it by hand to smoke-test
-# the packaging without tagging.
+# A macOS installer cannot be cross-built from Linux, so this workflow is the only way it
+# gets produced. Push a tag to cut a release; run it by hand to smoke-test the packaging
+# without tagging.
+#
+# Windows is built by hand, not here — see the Packaging section of the README.
 on:
   push:
     tags: ["v*"]
@@ -18,8 +20,6 @@ jobs:
           # built on, so building on the newest Ubuntu would refuse to start on older ones.
           - os: ubuntu-22.04
             artifact: AppImage
-          - os: windows-latest
-            artifact: setup.exe
           # arm64. cv2 and scipy publish no universal2 wheels, so there is no one dmg that
           # covers both Macs — add a macos-13 entry here if x86_64 is also needed.
           - os: macos-14
@@ -50,14 +50,6 @@ jobs:
           uv run --no-dev --group build pyinstaller --noconfirm analyser.spec
           bash packaging/linux/build-appimage.sh
 
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          uv run --no-dev --group build pyinstaller --noconfirm analyser.spec
-          choco install innosetup -y --no-progress
-          $v = uv run --no-dev --group build python -c "from importlib.metadata import version; print(version('analyser'))"
-          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" packaging\windows\analyser.iss
-
       # This script runs PyInstaller itself: the spec's BUNDLE needs the .icns to exist
       # before the build starts, and the script is what generates it.
       - name: Build (macOS)
@@ -67,10 +59,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: goncanalyser-${{ matrix.os }}
-          # Named explicitly so the 479MB unpacked onedir tree does not get uploaded too.
+          # Named explicitly so the 458MB unpacked onedir tree does not get uploaded too.
           path: |
             dist/*.AppImage
-            dist/*-setup.exe
             dist/*.dmg
           if-no-files-found: error
 
@@ -88,15 +79,15 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          # Unsigned builds trip Gatekeeper and SmartScreen; say so where users download.
+          # Unsigned builds trip Gatekeeper; say so where users download.
           body: |
             Download the installer for your platform below.
 
             **macOS** — the app is not notarised, so Gatekeeper will block the first
             launch. Right-click the app in Applications and choose *Open*, then confirm.
 
-            **Windows** — the installer is not code-signed, so SmartScreen will warn.
-            Choose *More info* then *Run anyway*.
-
             **Linux** — `chmod +x` the AppImage and run it. No installation needed.
+
+            **Windows** — no prebuilt installer. Build it from source: see the
+            Packaging section of the README.
           generate_release_notes: true

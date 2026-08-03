@@ -13,14 +13,17 @@ uv run python main.py shot.png      # one image
 
 ## Install
 
-Installers for all three platforms are on the
+Linux and macOS builds are on the
 [releases page](https://github.com/goncamateus/goncanalyser/releases) — no Python and no
-checkout needed. Linux gets an AppImage (`chmod +x` and run it), Windows a `setup.exe`,
-macOS a `.dmg`.
+checkout needed. Linux gets an AppImage (`chmod +x` and run it), macOS a `.dmg`.
 
-The builds are not code-signed, so the first launch needs a nudge: on macOS right-click
-the app in Applications and choose *Open* rather than double-clicking it, and on Windows
-choose *More info* then *Run anyway* when SmartScreen warns. The AppImage needs neither.
+The macOS build is not notarised, so the first launch needs a nudge: right-click the app
+in Applications and choose *Open* rather than double-clicking it. The AppImage needs no
+such thing.
+
+Windows has no prebuilt installer. The Inno Setup recipe is in the repo but has never been
+run, so treat it as a starting point rather than a supported path — see
+[Packaging](#packaging).
 
 ## Layout
 
@@ -292,9 +295,10 @@ iscc /DAppVersion=0.3.0 packaging\windows\analyser.iss
 `--group build` belongs on every `uv run` in a build, including the ones that only read
 the version — without it uv re-syncs and drops PyInstaller back out of the environment.
 
-An installer can only be built on the platform it targets, so
-`.github/workflows/release.yml` builds all three on tag push and attaches them to a
-GitHub release. Only the Linux path can be iterated locally.
+An installer can only be built on the platform it targets, which is why
+`.github/workflows/release.yml` exists: on tag push it builds the AppImage and the dmg and
+attaches both to a GitHub release. Windows is deliberately not in that matrix, so a release
+carries no `setup.exe` and the `.iss` above has never actually been executed.
 
 Two packaging constraints worth knowing before changing dependencies:
 
