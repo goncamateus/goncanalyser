@@ -1,4 +1,4 @@
-"""Export what the chain measured: JSON summary, CSV tables, processed overlays.
+"""Export what the chain measured: CSV tables, processed overlays, the settings.
 
 Written as a generator so the caller can drive a progress bar — a report re-runs
 the whole chain over the whole source, which with HOG on is a quarter-second a
@@ -7,8 +7,13 @@ frame.
 **Rows are streamed, not accumulated.** A 900-frame clip with SIFT on produces
 close to half a million keypoint rows, and holding those in a list before
 writing would cost more memory than the video. So each table's file is opened
-the first time a row of that kind appears and written per frame; only the
-per-frame metrics, which are a handful of numbers, are kept to build the JSON.
+the first time a row of that kind appears and written per frame; the per-frame
+metrics, which are a handful of numbers each, are the one exception — they are
+kept so `metrics.csv` can be written with a header taken from the first row.
+
+`settings.json` holds no measurements at all. The numbers are the CSVs' job, and
+duplicating them as JSON meant a 900-frame export carried the same table twice —
+half a megabyte of it — in two formats that could disagree.
 """
 
 import csv
@@ -24,7 +29,7 @@ from core.source import FrameSource
 
 from .motion import MotionState
 
-FORMATS = ("json", "csv", "overlays", "objects")
+FORMATS = ("settings", "csv", "overlays", "objects")
 
 
 class _Tables:
@@ -94,13 +99,30 @@ def write(path: str, s: Settings, out_dir: str, formats: tuple[str, ...]):
     summary: list[dict] = []
     written = []
     crops = 0
+
+    # Up front, because it does not depend on a single frame: a metrics table
+    # without the parameters that produced it is not reproducible, and these are
+    # the parameters. Same shape the app's own settings cache has, so the window
+    # loads it back through the same path.
+    if "settings" in formats:
+        (out / "settings.json").write_text(
+            json.dumps(
+                {"source": str(path), "frames": total, "settings": asdict(s)}, indent=2
+            )
+            + "\n"
+        )
+        written.append("settings.json")
+
+    # Nothing else ticked means nothing to measure — re-analysing the whole
+    # source to write a file that is already on disk would be pure waste.
+    measured = tuple(f for f in formats if f != "settings")
     # This run's own motion state. The loop below is strictly sequential, frame 0
     # upwards, which is exactly what it wants — and it is a separate object from
     # the viewer's, so exporting while the window plays disturbs neither.
     state = MotionState()
 
     try:
-        for index in range(total):
+        for index in range(total if measured else 0):
             raw = source.read(index)
             if raw is None:
                 break  # a truncated file is a normal thing to hand this
@@ -126,19 +148,6 @@ def write(path: str, s: Settings, out_dir: str, formats: tuple[str, ...]):
             writer.writeheader()
             writer.writerows(summary)
         written.append("metrics.csv")
-
-    if "json" in formats:
-        # The settings go in the file: a metrics table without the parameters
-        # that produced it is not reproducible, and these are the parameters.
-        (out / "report.json").write_text(
-            json.dumps(
-                {"source": str(path), "frames": len(summary), "settings": asdict(s),
-                 "metrics": summary},
-                indent=2,
-            )
-            + "\n"
-        )
-        written.append("report.json")
 
     if "overlays" in formats:
         written.append(f"overlays/ ({len(summary)} png)")
@@ -175,15 +184,18 @@ def _demo() -> None:
             except StopIteration as finished:
                 summary = finished.value
         assert seen == [(1, 3), (2, 3), (3, 3)], seen
-        assert summary["frames"] == 3 and "report.json" in summary["written"], summary
+        assert summary["frames"] == 3 and "settings.json" in summary["written"], summary
 
-        report = json.loads((dest / "report.json").read_text())
-        assert report["frames"] == 3, report
-        assert report["settings"]["detector"] == "ORB"
-        assert len(report["metrics"]) == 3 and "contours" in report["metrics"][0]
+        # The settings file carries the parameters and nothing else — the
+        # measurements are the CSVs' job and are not duplicated here.
+        saved = json.loads((dest / "settings.json").read_text())
+        assert saved["frames"] == 3 and saved["source"] == str(root), saved
+        assert saved["settings"] == asdict(s), saved["settings"]
+        assert "metrics" not in saved, saved
 
         rows = list(csv.DictReader((dest / "metrics.csv").open()))
         assert len(rows) == 3 and rows[0]["frame"] == "0"
+        assert "contours" in rows[0], rows[0]
 
         # Per-object tables carry the frame they came from, or they cannot be
         # joined back to anything.
@@ -215,11 +227,15 @@ def _demo() -> None:
         assert {r["frame"] for r in rows} <= {"1", "2"} and rows[0]["frame"] != "0"
         assert list((moving / "objects").glob("*.png")), "no object crops written"
 
-        # Asking for one format must not write the others.
-        only = Path(tmp) / "json-only"
-        list(write(str(root), s, str(only), ("json",)))
-        assert (only / "report.json").exists()
+        # Asking for one format must not write the others. Settings on its own
+        # also reads no frames at all — no progress ticks come out of it.
+        only = Path(tmp) / "settings-only"
+        steps = write(str(root), s, str(only), ("settings",))
+        assert list(steps) == [], "settings-only re-analysed the source"
+        assert (only / "settings.json").exists()
         assert not (only / "metrics.csv").exists() and not (only / "overlays").exists()
+        # …and it still knows how long the source is, without having read it.
+        assert json.loads((only / "settings.json").read_text())["frames"] == 3
 
     print("report ok")
 

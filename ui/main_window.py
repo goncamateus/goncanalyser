@@ -15,7 +15,9 @@ Every tab reports through the same `changed` signal into `push_settings()`, so
 adding a control never means adding a connection here.
 """
 
+import json
 from dataclasses import asdict
+from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
@@ -39,7 +41,7 @@ from core.source import FrameSource, SourceError
 from core.worker import ReportThread, Worker
 
 from .controls import AdjustTab, GlobalTab, LocalTab, MotionTab, StructuresTab
-from .dialogs import ExportDialog, PreferencesDialog, open_folder, open_source
+from .dialogs import ExportDialog, PreferencesDialog, open_folder, open_settings, open_source
 from .viewer import Viewer
 
 PANEL_WIDTH = 400
@@ -81,11 +83,9 @@ class MainWindow(QMainWindow):
 
         # Pick up where the last session left off. Fields the file does not carry
         # keep the widget defaults, so an old cache survives a new knob.
-        cached = load_cached()
-        for section in self.sections:
-            section.restore(cached)
-        self.view.setCurrentText(cached.get("view", Settings().view))
-        self.settings = self._collect()
+        # Same path the File menu's loader takes; it is a no-op on the worker,
+        # which does not exist yet, and leaves `self.settings` ready for it.
+        self.apply_settings(load_cached())
 
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -186,7 +186,8 @@ class MainWindow(QMainWindow):
         for text, keys, slot in (
             ("Open image or video…", "Ctrl+O", self.open_file),
             ("Open image folder…", "Ctrl+Shift+O", self.open_dir),
-            ("Export analysis…", "Ctrl+E", self.export),
+            ("Load settings…", "Ctrl+L", self.load_settings),
+            ("Export analysis…", "Ctrl+S", self.export),
             ("Reset all controls", "Ctrl+R", self.reset_settings),
             ("Preferences…", "Ctrl+,", self.preferences),
             ("Close window", "Ctrl+W", self.close),
@@ -265,6 +266,18 @@ class MainWindow(QMainWindow):
         # what needs rendering as well as what needs computing.
         self.push_previews()
 
+    def apply_settings(self, values: dict) -> None:
+        """Put a saved settings dict into the controls and push it once.
+
+        Fields the dict does not carry keep whatever the widget already has, so
+        this takes the cache, an export's `settings.json`, or a partial hand-
+        written file just as happily.
+        """
+        for section in self.sections:
+            section.restore(values)
+        self.view.setCurrentText(values.get("view", Settings().view))
+        self.push_settings()
+
     def push_previews(self) -> None:
         """Tell the worker which thumbnails the *visible* tab wants, and no others.
 
@@ -293,11 +306,30 @@ class MainWindow(QMainWindow):
             self._undo = asdict(self.settings)
             note = "controls reset — Ctrl+R again to undo"
 
-        for section in self.sections:
-            section.restore(blank)
-        self.view.setCurrentText(blank["view"])
-        self.push_settings()
+        self.apply_settings(blank)
         self.statusBar().showMessage(note)
+
+    def load_settings(self) -> None:
+        """Take the tuning out of an exported settings.json and put it back.
+
+        An export carries the settings that produced it precisely so a run can be
+        reproduced; this is the other half of that. The app's own cache file
+        works too — the same flat dict, only not nested under "settings".
+        """
+        path = open_settings(self)
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text())
+            values = data.get("settings", data) if isinstance(data, dict) else None
+            if not isinstance(values, dict):
+                raise ValueError("no settings in this file")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Cannot load settings", str(exc))
+            return
+
+        self.apply_settings(values)
+        self.statusBar().showMessage(f"settings loaded from {Path(path).name}")
 
     # --- worker -------------------------------------------------------------
 

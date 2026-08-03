@@ -23,7 +23,7 @@ from core.source import ANY_FILTER
 from features.report import FORMATS
 
 LABELS = {
-    "json": "report.json — settings and per-frame metrics",
+    "settings": "settings.json — every control's value, reloadable",
     "csv": "CSV tables — metrics.csv plus one file per object kind",
     "overlays": "overlays/ — the processed frames as PNG",
     "objects": "objects/ — every moving object, cropped out of the source",
@@ -41,6 +41,14 @@ def open_folder(parent) -> str:
     return QFileDialog.getExistingDirectory(parent, "Open image folder")
 
 
+def open_settings(parent) -> str:
+    """Ask for a settings.json to load. Returns "" when cancelled."""
+    path, _ = QFileDialog.getOpenFileName(
+        parent, "Load settings", "", "JSON (*.json);;All files (*)"
+    )
+    return path
+
+
 class ExportDialog(QDialog):
     """Where to write the report, and which parts of it to write."""
 
@@ -50,7 +58,7 @@ class ExportDialog(QDialog):
         self.setMinimumWidth(460)
 
         self.boxes = {name: QCheckBox(LABELS[name]) for name in FORMATS}
-        self.boxes["json"].setChecked(True)
+        self.boxes["settings"].setChecked(True)
         self.boxes["csv"].setChecked(True)
 
         self.folder = QLineEdit()

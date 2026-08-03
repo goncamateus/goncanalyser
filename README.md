@@ -193,9 +193,10 @@ visible.
 
 **File → Export analysis…** re-runs the chain over every frame and writes any of:
 
-* `report.json` — the full `Settings` plus per-frame metrics. The settings are in
-  the file because a metrics table without the parameters that produced it is not
-  reproducible.
+* `settings.json` — the full `Settings`, and no measurements. A metrics table
+  without the parameters that produced it is not reproducible, so the parameters
+  ship alongside it; the numbers themselves are the CSVs' job. Ticking this on
+  its own reads no frames at all, so it is instant.
 * `metrics.csv` — one row per frame; `contours.csv`, `keypoints.csv`,
   `blobs.csv`, `lines.csv`, `corners.csv`, `motion.csv`, `histogram.csv` — one
   row per object, each carrying the frame it came from.
@@ -216,11 +217,19 @@ than fatal, and a cache written before a knob existed still loads — the missin
 field keeps its default. **File → Preferences** shows the path and resets
 everything.
 
+**File → Load settings…** goes the other way: point it at an exported
+`settings.json` and the tuning that produced that export goes back into the
+controls. Reproducing a run is the point of exporting the settings alongside the
+metrics. The cache file works there too — the same flat dict, only not nested
+under `settings` — and either way a field the file does not carry keeps its
+current value, so an export from an older build still loads.
+
 ## Keys
 
 `space` play/pause · `.` step forward · `,` step back · `Ctrl+O` open ·
-`Ctrl+Shift+O` open folder · `Ctrl+E` export · `Ctrl+R` reset all controls ·
-`Ctrl+W` close (`⌘W` on macOS, where Qt maps Ctrl onto Command)
+`Ctrl+Shift+O` open folder · `Ctrl+L` load settings ·
+`Ctrl+S` export · `Ctrl+R` reset all controls · `Ctrl+W` close (`⌘W` on macOS,
+where Qt maps Ctrl onto Command — so these are `⌘S`, `⌘L`, `⌘R` there)
 
 `Ctrl+R` does not ask for confirmation — a shortcut that stops to ask is not
 worth having. It stashes the previous values instead, so pressing it again puts
