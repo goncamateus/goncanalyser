@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Analyser
+GenericName=Image and video analysis
+Comment=Live OpenCV feature analysis: adjustments, colour, texture, keypoints, structures
+Exec=analyser %f
+Icon=analyser
+Categories=Graphics;ImageProcessing;
+Terminal=false
+MimeType=image/png;image/jpeg;image/bmp;image/tiff;image/webp;video/mp4;video/quicktime;video/x-matroska;video/webm;

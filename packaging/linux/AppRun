@@ -1,0 +1,5 @@
+#!/bin/sh
+# AppImage entry point. Arguments are forwarded so that
+# `./goncanalyser.AppImage clip.mp4` still skips the file dialog, same as main.py does.
+HERE=$(dirname "$(readlink -f "$0")")
+exec "$HERE/usr/bin/analyser" "$@"

@@ -11,6 +11,17 @@ uv run python main.py frames/       # a folder of images
 uv run python main.py shot.png      # one image
 ```
 
+## Install
+
+Installers for all three platforms are on the
+[releases page](https://github.com/goncamateus/goncanalyser/releases) — no Python and no
+checkout needed. Linux gets an AppImage (`chmod +x` and run it), Windows a `setup.exe`,
+macOS a `.dmg`.
+
+The builds are not code-signed, so the first launch needs a nudge: on macOS right-click
+the app in Applications and choose *Open* rather than double-clicking it, and on Windows
+choose *More info* then *Run anyway* when SmartScreen warns. The AppImage needs neither.
+
 ## Layout
 
 ```
@@ -254,3 +265,44 @@ uv run python -m features.report    # JSON and CSV round-trip, driven like Repor
 uv run python -m ui.viewer          # widget->image mapping, both letterbox orientations
 uv run python -m ui.controls.base   # groups are siblings; every Settings field has a knob
 ```
+
+## Packaging
+
+`analyser.spec` is one PyInstaller recipe shared by all three platforms; each one then has
+a short script that turns the bundle into an installer.
+
+```bash
+uv sync --no-dev --group build
+
+# Linux and Windows: bundle first, then wrap it.
+uv run --no-dev --group build pyinstaller --noconfirm analyser.spec
+bash packaging/linux/build-appimage.sh   # -> dist/goncanalyser-VERSION-ARCH.AppImage
+
+# macOS is one step, not two: the spec's BUNDLE needs the .icns, and this script is what
+# generates it, so it calls PyInstaller itself.
+bash packaging/macos/build-dmg.sh        # -> dist/goncanalyser-VERSION-arm64.dmg
+```
+
+Windows wrapping needs [Inno Setup](https://jrsoftware.org/isinfo.php):
+
+```
+iscc /DAppVersion=0.3.0 packaging\windows\analyser.iss
+```
+
+`--group build` belongs on every `uv run` in a build, including the ones that only read
+the version — without it uv re-syncs and drops PyInstaller back out of the environment.
+
+An installer can only be built on the platform it targets, so
+`.github/workflows/release.yml` builds all three on tag push and attaches them to a
+GitHub release. Only the Linux path can be iterated locally.
+
+Two packaging constraints worth knowing before changing dependencies:
+
+- The dependency is `opencv-python-headless`, not `opencv-python`. Nothing here calls
+  `cv2.imshow` or `waitKey`, and the plain wheel ships a second copy of Qt that fights
+  PyQt6's inside a bundle — the classic `Could not load the Qt platform plugin "xcb"`.
+- macOS ships arm64 only. cv2 and scipy publish separate arm64 and x86_64 wheels with no
+  `universal2`, so one dmg cannot cover both kinds of Mac.
+
+`packaging/icon.png` is a placeholder. Replacing it wants a 1024×1024 PNG plus a
+regenerated `icon.ico`; the macOS `.icns` is derived at build time by `build-dmg.sh`.

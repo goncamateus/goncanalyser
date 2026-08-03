@@ -5,7 +5,9 @@ description = "Qt workspace for live OpenCV feature analysis: adjustments, colou
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "numpy>=2.0",
-    "opencv-python>=4.10",
+    # headless, not the plain wheel: nothing here calls cv2.imshow/waitKey, and the
+    # plain wheel ships its own Qt libraries that fight PyQt6's inside a frozen bundle.
+    "opencv-python-headless>=4.10",
     "pyqt6>=6.7",
     "scikit-image>=0.24",
 ]
@@ -15,6 +17,7 @@ analyser = "main:main"
 
 [dependency-groups]
 dev = ["pytest"]
+build = ["pyinstaller>=6.11"]
 
 [tool.setuptools]
 py-modules = ["main"]
