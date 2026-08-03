@@ -1,5 +1,12 @@
 *.mp4
+
+# Export artifacts — the output dir is picked at runtime, so match by name.
 out/
+settings.json
+report.json
+*.csv
+overlays/
+objects/
 .venv/
 __pycache__/
 *.egg-info/
