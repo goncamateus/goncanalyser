@@ -183,3 +183,50 @@ class ReportThread(QThread):
                 self.progress.emit(done, total)
         except (OSError, ValueError) as exc:
             self.failed.emit(str(exc))
+
+
+class DatasetThread(QThread):
+    """Surveys or tunes against a COCO dataset, off the GUI thread.
+
+    The same three signals and the same generator-draining loop as `ReportThread`,
+    because `dataset.stats.analyse` and `dataset.optimise.search` deliberately have
+    the same shape as `report.write`. Both jobs are minutes long: a survey decodes
+    a few hundred images, and a study runs the whole chain once per image per
+    trial.
+
+    **`dataset` is imported inside `run()`, never at module scope.** matplotlib and
+    optuna live in an optional dependency group, so they are absent from the frozen
+    desktop bundle — and this module is imported the moment the window opens. A top
+    -level import here would turn a missing optional group into a dead application.
+    """
+
+    progress = pyqtSignal(int, int)  # done, total
+    finished_with = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, mode: str, options: dict):
+        super().__init__()
+        self.mode = mode  # "analyse" | "optimise"
+        self.options = options
+
+    def run(self) -> None:
+        try:
+            if self.mode == "optimise":
+                from dataset.optimise import search as job
+            else:
+                from dataset.stats import analyse as job
+
+            steps = job(**self.options)
+            while True:
+                try:
+                    done, total = next(steps)
+                except StopIteration as finished:
+                    self.finished_with.emit({"mode": self.mode, **(finished.value or {})})
+                    return
+                self.progress.emit(done, total)
+        # ImportError is the missing dependency group, and it reaches here rather
+        # than the window whenever the group was uninstalled after the window
+        # opened. KeyError is a malformed annotation file — one missing "bbox"
+        # three hundred images in should not take the application down.
+        except (OSError, ValueError, KeyError, ImportError) as exc:
+            self.failed.emit(str(exc))
