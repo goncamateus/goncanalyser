@@ -18,12 +18,18 @@ analyser = "main:main"
 [dependency-groups]
 dev = ["pytest"]
 build = ["pyinstaller>=6.11"]
+# Ground-truth work: reading a COCO dataset and tuning against it. A group, not a
+# runtime dependency, because neither is needed to open an image — the desktop
+# bundle ships without them and `ui.main_window.analyse_dataset` says so rather
+# than failing at launch. No pycocotools: COCO annotations are plain JSON,
+# polygons decode with cv2.fillPoly, and crowd RLE is a handful of lines.
+dataset = ["matplotlib>=3.8", "optuna>=4.0"]
 
 [tool.setuptools]
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "features*", "ui*"]
+include = ["core*", "features*", "ui*", "dataset*"]
 
 [build-system]
 requires = ["setuptools"]
