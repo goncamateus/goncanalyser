@@ -38,10 +38,18 @@ from PyQt6.QtWidgets import (
 
 from core.settings import VIEWS, Settings, load_cached, save_cached
 from core.source import FrameSource, SourceError
-from core.worker import ReportThread, Worker
+from core.worker import DatasetThread, ReportThread, Worker
 
 from .controls import AdjustTab, GlobalTab, LocalTab, MotionTab, StructuresTab
-from .dialogs import ExportDialog, PreferencesDialog, open_folder, open_settings, open_source
+from .dialogs import (
+    DashboardDialog,
+    DatasetDialog,
+    ExportDialog,
+    PreferencesDialog,
+    open_folder,
+    open_settings,
+    open_source,
+)
 from .viewer import Viewer
 
 PANEL_WIDTH = 400
@@ -65,6 +73,7 @@ class MainWindow(QMainWindow):
         self.source = source
         self.worker: Worker | None = None  # set at the end of __init__
         self.exporter: ReportThread | None = None
+        self.dataset: DatasetThread | None = None
         self.frames = 0
         self._undo: dict | None = None  # settings from before the last Ctrl+R
 
@@ -204,6 +213,15 @@ class MainWindow(QMainWindow):
             action = QAction(title, self)
             action.triggered.connect(lambda _=False, i=index: self.tabs.setCurrentIndex(i))
             bar.addAction(action)
+
+        # The one header action that is not a tab. It belongs beside them rather
+        # than under File because it is an analysis verb, not a file operation —
+        # and unlike the five, there is no always-visible panel it could raise:
+        # a dataset is not part of the frame on screen.
+        dataset = QAction("Analyse dataset…", self)
+        dataset.setShortcut(QKeySequence("Ctrl+D"))
+        dataset.triggered.connect(self.analyse_dataset)
+        bar.addAction(dataset)
 
     # --- region of interest -------------------------------------------------
 
@@ -406,6 +424,85 @@ class MainWindow(QMainWindow):
     def preferences(self) -> None:
         PreferencesDialog(self, self.reset_settings).exec()
 
+    # --- dataset ------------------------------------------------------------
+
+    def analyse_dataset(self) -> None:
+        """Survey a COCO dataset, or tune the controls against its masks.
+
+        The import check is here rather than at the top of the module on purpose:
+        matplotlib and optuna are an optional dependency group, so the packaged
+        desktop build does not carry them. Missing them has to cost this one
+        dialog, not the application's ability to open an image.
+        """
+        if self.dataset is not None:
+            self.statusBar().showMessage("a dataset job is already running")
+            return
+        try:
+            import matplotlib  # noqa: F401
+            import optuna  # noqa: F401
+        except ImportError:
+            QMessageBox.information(
+                self,
+                "Dataset tools not installed",
+                "Analysing a dataset needs matplotlib and optuna, which ship "
+                "separately from the app.\n\nInstall them with:\n\n"
+                "    uv sync --group dataset",
+            )
+            return
+
+        chosen = DatasetDialog.ask(self)
+        if chosen is None:
+            return
+        mode, options = chosen
+        if mode == "optimise":
+            # Trial zero is whatever is on screen, so the search starts from the
+            # tuning already done by hand and the result is comparable to it.
+            options["seed"] = asdict(self.settings)
+
+        self.dataset = DatasetThread(mode, options)
+        verb = "optimising" if mode == "optimise" else "analysing"
+        self.dataset.progress.connect(
+            lambda done, total: self.statusBar().showMessage(f"{verb} {done}/{total}…")
+        )
+        self.dataset.finished_with.connect(self.on_dataset_done)
+        self.dataset.failed.connect(self.on_dataset_failed)
+        self.dataset.start()
+
+    def on_dataset_done(self, result: dict) -> None:
+        self.dataset = None
+        if result.get("mode") == "optimise":
+            self.on_optimised(result)
+            return
+        summary = result.get("summary", {})
+        self.statusBar().showMessage(
+            f"analysed {summary.get('images_sampled', 0)} images "
+            f"({summary.get('annotations', 0)} annotations) — {result.get('dir')}"
+        )
+        DashboardDialog(self, result).exec()
+
+    def on_optimised(self, result: dict) -> None:
+        """Offer the winner. Applying it is the same path a loaded file takes."""
+        changed = result.get("changed") or {}
+        lines = "\n".join(f"    {k} = {v}" for k, v in sorted(changed.items()))
+        box = QMessageBox(self)
+        box.setWindowTitle("Optimisation finished")
+        box.setText(
+            f"Best f(θ) = {result.get('score')} over {result.get('images')} images, "
+            f"up from {result.get('baseline')} at the current settings.\n\n"
+            f"{len(changed)} parameters changed:\n{lines}\n\n"
+            f"Saved to {result.get('dir')}/best_settings.json"
+        )
+        apply = box.addButton("Apply", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Discard", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is apply:
+            self.apply_settings(result["best"])
+            self.statusBar().showMessage(f"optimised settings applied — f(θ) = {result.get('score')}")
+
+    def on_dataset_failed(self, message: str) -> None:
+        self.dataset = None
+        QMessageBox.warning(self, "Dataset analysis failed", message)
+
     # --- transport ----------------------------------------------------------
 
     def toggle_play(self) -> None:
@@ -456,6 +553,8 @@ class MainWindow(QMainWindow):
             self.worker = None
         if self.exporter is not None:
             self.exporter.wait()
+        if self.dataset is not None:
+            self.dataset.wait()
         self.source.release()
         save_cached(self.settings)
         super().closeEvent(event)
