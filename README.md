@@ -43,6 +43,10 @@ features/                  no Qt in here either
   motion.py                heatmap, foreground, six motion algorithms — the one
                            feature that spans frames, so the one with state
   report.py                JSON / CSV / overlay / object-crop export
+dataset/                   optional: needs `uv sync --group dataset`
+  coco.py                  COCO annotations -> masks. Plain JSON, no pycocotools
+  stats.py                 what separates annotated pixels from background
+  optimise.py              search the settings that best reproduce the GT masks
 ui/
   main_window.py           viewer left, tabs right, menu bar, transport
   dialogs.py               File menu: open, export, preferences
@@ -222,6 +226,69 @@ visible.
 Rows are streamed, not accumulated: a 900-frame clip with SIFT on produces close
 to half a million keypoint rows, which would cost more memory than the video.
 
+## Analyse dataset
+
+Everything above shows you what the current settings *do*. This is the only part
+that knows what they *should* do, because it is the only part with ground truth.
+
+**Analyse dataset…** in the menu bar (`Ctrl+D`) takes a COCO segmentation
+dataset — an `instances_*.json` and the folder of images it describes — and
+offers two verbs over the same inputs.
+
+Optional: `uv sync --group dataset` installs matplotlib and optuna. Without them
+the button explains that instead of failing, and the packaged desktop build
+deliberately ships without them. COCO itself needs no dependency at all —
+annotations are plain JSON, polygons are `cv2.fillPoly`, and crowd RLE is eight
+lines.
+
+**Analyse** surveys the dataset in two passes, split because they cost three
+orders of magnitude apart. Every annotation in the file is cheap, so all of them
+are used for area ratios, aspect, scale variance, mask complexity
+(`P²/4πA`), class co-occurrence and inter-class bbox overlap. The pixel metrics
+need images decoded, so they run over a sample: colour histograms in RGB/HSV/LAB,
+contrast, LBP texture, Sobel and Canny edge density, radial FFT profile, and an
+occupancy heatmap. Each of those is measured **twice on the same frame** — once
+under the mask, once under its complement. A histogram of annotated pixels alone
+says almost nothing; the useful quantity is the difference from the background
+they have to be told apart from, and taking both from one frame cancels exposure
+and scene content out of the comparison. Five figures and a `summary.json` land
+in the output folder and open in a dashboard.
+
+**Optimise** searches for the settings that best reproduce the ground-truth
+masks, scoring
+
+```
+f(θ) = α·IoU(Mθ, Mgt) + β·|Mθ ∩ Mgt|/|Mgt| − γ·|Mθ \ Mgt|/|I \ Mgt|
+```
+
+IoU alone would do for a benchmark. β pays for coverage, so a timid threshold
+that finds a clean sliver of every object cannot win; γ charges for spilled
+background, normalised by how much background there is, so over-segmenting costs
+the same whether the objects are large or small. The result offers **Apply**,
+which loads it into the tabs, and writes `best_settings.json` in the same shape
+an export uses — so `Ctrl+L` reads it back.
+
+It searches **twelve** parameters, not the whole panel, and the reason is
+structural. `Mθ` is the Contour mask, and there is one route to it:
+
+```
+adjust.apply() -> canvases["Threshold"] -> structure._contours() -> "Contour mask"
+```
+
+`_contours` reads the Threshold canvas and nothing else. So every Image
+Adjustment knob reaches the score, as do the contour mode and minimum area — and
+HOG, LBP, SIFT, ORB, Canny, Hough, Harris and the blob detector cannot move it by
+a pixel, because they produce descriptors, keypoints and overlays rather than a
+mask. Searching them would not be more thorough; it would be twenty-three
+dimensions of noise at a second a trial. `contours_on` is pinned on, since it is
+what makes a mask at all, and `roi_on` pinned off, since a ground-truth mask
+covers the whole frame.
+
+Proposed floats are snapped to `0.01`, which is what `Knob` can hold on an
+integer Qt slider. Otherwise the winner would quietly become a slightly different
+setting the moment **Apply** put it into a slider, and the score printed beside it
+would not be the score you had.
+
 ## Settings cache
 
 Written on quit, restored on the next launch, in the per-platform config
@@ -242,7 +309,8 @@ current value, so an export from an older build still loads.
 
 `space` play/pause · `.` step forward · `,` step back · `Ctrl+O` open ·
 `Ctrl+Shift+O` open folder · `Ctrl+L` load settings ·
-`Ctrl+S` export · `Ctrl+R` reset all controls · `Ctrl+W` close (`⌘W` on macOS,
+`Ctrl+S` export · `Ctrl+D` analyse dataset · `Ctrl+R` reset all controls ·
+`Ctrl+W` close (`⌘W` on macOS,
 where Qt maps Ctrl onto Command — so these are `⌘S`, `⌘L`, `⌘R` there)
 
 `Ctrl+R` does not ask for confirmation — a shortcut that stops to ask is not
@@ -268,6 +336,22 @@ uv run python -m features.report    # JSON and CSV round-trip, driven like Repor
 uv run python -m ui.viewer          # widget->image mapping, both letterbox orientations
 uv run python -m ui.controls.base   # groups are siblings; every Settings field has a knob
 ```
+
+The `dataset` package needs its group, and builds its own COCO fixture — bright
+squares on dark noise, with unannotated mid-grey distractors bright enough that
+the default threshold finds them and is punished for it, so an optimiser that is
+not really searching cannot pass:
+
+```bash
+uv run --group dataset python -m dataset.coco      # polygons and column-major RLE decode
+uv run --group dataset python -m dataset.stats     # mask reads brighter than background
+uv run --group dataset python -m dataset.optimise  # f(θ) corners exact; a study beats defaults
+```
+
+These are not in the release workflow's gate. That gate exists to catch a broken
+dependency before twenty minutes of packaging, and `dataset/` is never packaged —
+failing a release because an optional analysis tool's optional dependency would
+not install on a runner is strictly worse than not checking it there.
 
 ## Packaging
 
