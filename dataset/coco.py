@@ -90,10 +90,13 @@ class Coco:
         """One annotation as uint8 0/255, or None if it cannot be decoded."""
         seg = ann.get("segmentation")
         if isinstance(seg, dict):
-            if isinstance(seg.get("counts"), str):
-                self.skipped += 1  # compressed RLE — see the module docstring
+            counts = seg.get("counts")
+            try:
+                return _rle(_uncompress(counts) if isinstance(counts, str) else counts,
+                            seg["size"]) * 255
+            except (KeyError, IndexError, TypeError, ValueError):
+                self.skipped += 1
                 return None
-            return _rle(seg["counts"], seg["size"]) * 255
         if not seg:
             return None
 
@@ -111,6 +114,41 @@ class Coco:
         return mask
 
 
+def _uncompress(text: str) -> list[int]:
+    """COCO's compressed RLE string to plain run lengths.
+
+    The format most exports actually emit, and the one thing here that had to be
+    ported rather than read off the JSON. Each run is a variable-length integer in
+    5-bit groups, low group first, every group biased by 48 into printable ASCII:
+    bit 0x20 says another group follows, and 0x10 on the last group sign-extends,
+    because the values are deltas and deltas go both ways. From the fourth run
+    onward each value is relative to the one two places back.
+
+    Roboflow and most tooling write this; COCO's own instances_*.json writes the
+    plain list form that `_rle` takes directly. Both have to work — a dataset
+    whose masks silently come back empty is worse than one that will not load.
+    """
+    counts: list[int] = []
+    data = text.encode("ascii", "ignore")
+    at = 0
+    while at < len(data):
+        value, shift, more = 0, 0, True
+        while more:
+            if at >= len(data):
+                raise ValueError("truncated compressed RLE")
+            char = data[at] - 48
+            value |= (char & 0x1F) << (5 * shift)
+            more = bool(char & 0x20)
+            at += 1
+            shift += 1
+            if not more and char & 0x10:
+                value |= -1 << (5 * shift)  # negative delta, sign-extended
+        if len(counts) > 2:
+            value += counts[-2]
+        counts.append(value)
+    return counts
+
+
 def _rle(counts, size) -> np.ndarray:
     """Uncompressed COCO RLE to a uint8 0/1 mask.
 
@@ -120,12 +158,23 @@ def _rle(counts, size) -> np.ndarray:
     check below uses a rectangle.
     """
     height, width = int(size[0]), int(size[1])
+    runs = [int(c) for c in counts]
+    # An RLE covers every pixel exactly once, so the runs sum to the frame and
+    # none of them is negative. Checked rather than assumed, because the failure
+    # it catches is the quiet one: numpy clips a bad slice, so garbage otherwise
+    # decodes to a plausible, mostly-empty mask and every metric downstream is
+    # computed against nothing at all.
+    if any(r < 0 for r in runs) or sum(runs) != height * width:
+        raise ValueError(
+            f"RLE runs sum to {sum(runs)}, not the {height}x{width} = "
+            f"{height * width} pixels they must cover"
+        )
+
     flat = np.zeros(height * width, np.uint8)
     at, value = 0, 0
-    for run in counts:
-        run = int(run)
+    for run in runs:
         if value:
-            flat[at : at + run] = 1  # numpy clips a run that overshoots
+            flat[at : at + run] = 1
         at += run
         value ^= 1
     return flat.reshape((width, height)).T
@@ -235,6 +284,24 @@ def _demo() -> None:
     import tempfile
     from itertools import groupby
 
+    def _compress(counts: list[int]) -> str:
+        """The encoder, so the decoder can be checked by round-trip.
+
+        Test scaffolding, and deliberately not part of the module: nothing here
+        writes annotation files. A hand-typed compressed string would be a
+        fixture nobody could verify by reading it.
+        """
+        out = []
+        for i, value in enumerate(counts):
+            x = int(value) - (int(counts[i - 2]) if i > 2 else 0)
+            more = True
+            while more:
+                c = x & 0x1F
+                x >>= 5  # arithmetic in Python as in C, which is what sign needs
+                more = x != -1 if c & 0x10 else x != 0
+                out.append(chr((c | 0x20 if more else c) + 48))
+        return "".join(out)
+
     coco = Coco({"images": [], "annotations": [], "categories": []})
 
     # A rectangle that is not symmetric under transpose, encoded the way COCO
@@ -255,9 +322,25 @@ def _demo() -> None:
     crowd = {"segmentation": {"counts": counts, "size": [height, width]}, "iscrowd": 1}
     assert (coco.instance(crowd, height, width) == truth * 255).all()
 
-    # Compressed RLE is skipped and counted, not fatal.
-    assert coco.instance({"segmentation": {"counts": "abc", "size": [1, 1]}}, 1, 1) is None
-    assert coco.skipped == 1
+    # Compressed RLE, which is what most exports actually write. Round-tripped
+    # through the real encoding rather than a handmade string: the deltas only
+    # start at the fourth run and only then go negative, so a short fixture would
+    # never exercise the branch that sign-extends.
+    packed = _compress(counts)
+    assert isinstance(packed, str) and packed
+    assert _uncompress(packed) == counts, "compressed RLE did not round-trip"
+    dense = {"segmentation": {"counts": packed, "size": [height, width]}}
+    assert (coco.instance(dense, height, width) == truth * 255).all()
+    assert coco.skipped == 0, "a decodable annotation was counted as a failure"
+
+    # Negative deltas specifically — a run shorter than the one two places back.
+    wobbly = [0, 7, 3, 40, 2, 9, 1, 60, 5]
+    assert _uncompress(_compress(wobbly)) == wobbly, "sign extension is wrong"
+
+    # Garbage is counted and skipped, not fatal.
+    assert coco.instance({"segmentation": {"counts": "\x00", "size": [1, 1]}}, 1, 1) is None
+    assert coco.instance({"segmentation": {"nope": 1}}, 1, 1) is None
+    assert coco.skipped == 2, coco.skipped
 
     # A polygon fills its interior and nothing else, and a degenerate one is None.
     poly = coco.instance({"segmentation": [[5, 10, 15, 10, 15, 20, 5, 20]]}, height, width)
