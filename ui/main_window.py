@@ -42,9 +42,10 @@ from core.worker import DatasetThread, ReportThread, Worker
 
 from .controls import AdjustTab, GlobalTab, LocalTab, MotionTab, StructuresTab
 from .dialogs import (
+    AnalyseDialog,
     DashboardDialog,
-    DatasetDialog,
     ExportDialog,
+    OptimiseDialog,
     PreferencesDialog,
     open_folder,
     open_settings,
@@ -214,14 +215,19 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _=False, i=index: self.tabs.setCurrentIndex(i))
             bar.addAction(action)
 
-        # The one header action that is not a tab. It belongs beside them rather
-        # than under File because it is an analysis verb, not a file operation —
-        # and unlike the five, there is no always-visible panel it could raise:
-        # a dataset is not part of the frame on screen.
-        dataset = QAction("Analyse dataset…", self)
-        dataset.setShortcut(QKeySequence("Ctrl+D"))
-        dataset.triggered.connect(self.analyse_dataset)
-        bar.addAction(dataset)
+        # The one header entry that is a menu rather than a tab. Two verbs, and
+        # they are genuinely separate jobs: different questions, different output,
+        # different optional dependencies. Neither is a mode of the other, so
+        # neither is a checkbox inside the other's dialog.
+        dataset = bar.addMenu("Dataset")
+        for text, keys, slot in (
+            ("Analyse…", "Ctrl+D", self.analyse_dataset),
+            ("Optimise…", "Ctrl+Shift+D", self.optimise_dataset),
+        ):
+            action = QAction(text, self)
+            action.setShortcut(QKeySequence(keys))
+            action.triggered.connect(slot)
+            dataset.addAction(action)
 
     # --- region of interest -------------------------------------------------
 
@@ -427,52 +433,60 @@ class MainWindow(QMainWindow):
     # --- dataset ------------------------------------------------------------
 
     def analyse_dataset(self) -> None:
-        """Survey a COCO dataset, or tune the controls against its masks.
+        """Survey what separates a dataset's annotated pixels from its background."""
+        try:
+            from dataset.stats import analyse
+        except ImportError as exc:
+            self._no_dataset_tools(exc)
+            return
+        self._run_dataset(analyse, AnalyseDialog, "analysing", self.on_analysed)
 
-        The import check is here rather than at the top of the module on purpose:
-        matplotlib and optuna are an optional dependency group, so the packaged
-        desktop build does not carry them. Missing them has to cost this one
-        dialog, not the application's ability to open an image.
+    def optimise_dataset(self) -> None:
+        """Search the settings that best reproduce a dataset's masks."""
+        try:
+            from dataset.optimise import search
+        except ImportError as exc:
+            self._no_dataset_tools(exc)
+            return
+        self._run_dataset(search, OptimiseDialog, "optimising", self.on_optimised,
+                          # Trial zero is whatever is on screen, so the search starts
+                          # from the tuning already done by hand and the result is
+                          # always comparable against it.
+                          seed=asdict(self.settings))
+
+    def _no_dataset_tools(self, exc: ImportError) -> None:
+        """Name the one package that is missing, not the whole group.
+
+        Surveying needs matplotlib and tuning needs optuna, and neither needs the
+        other's. Reporting both would send someone installing a dependency the
+        thing they asked for does not use.
         """
+        QMessageBox.information(
+            self,
+            "Dataset tools not installed",
+            f"This needs {exc.name}, which ships separately from the app.\n\n"
+            "Install it with:\n\n    uv sync --group dataset",
+        )
+
+    def _run_dataset(self, job, dialog, verb: str, done, **extra) -> None:
+        """Ask for the inputs, then drive one dataset job on its own thread."""
         if self.dataset is not None:
             self.statusBar().showMessage("a dataset job is already running")
             return
-        try:
-            import matplotlib  # noqa: F401
-            import optuna  # noqa: F401
-        except ImportError:
-            QMessageBox.information(
-                self,
-                "Dataset tools not installed",
-                "Analysing a dataset needs matplotlib and optuna, which ship "
-                "separately from the app.\n\nInstall them with:\n\n"
-                "    uv sync --group dataset",
-            )
+        options = dialog.ask(self)
+        if options is None:
             return
 
-        chosen = DatasetDialog.ask(self)
-        if chosen is None:
-            return
-        mode, options = chosen
-        if mode == "optimise":
-            # Trial zero is whatever is on screen, so the search starts from the
-            # tuning already done by hand and the result is comparable to it.
-            options["seed"] = asdict(self.settings)
-
-        self.dataset = DatasetThread(mode, options)
-        verb = "optimising" if mode == "optimise" else "analysing"
+        self.dataset = DatasetThread(job, {**options, **extra})
         self.dataset.progress.connect(
-            lambda done, total: self.statusBar().showMessage(f"{verb} {done}/{total}…")
+            lambda at, total: self.statusBar().showMessage(f"{verb} {at}/{total}…")
         )
-        self.dataset.finished_with.connect(self.on_dataset_done)
+        self.dataset.finished_with.connect(done)
         self.dataset.failed.connect(self.on_dataset_failed)
         self.dataset.start()
 
-    def on_dataset_done(self, result: dict) -> None:
+    def on_analysed(self, result: dict) -> None:
         self.dataset = None
-        if result.get("mode") == "optimise":
-            self.on_optimised(result)
-            return
         summary = result.get("summary", {})
         self.statusBar().showMessage(
             f"analysed {summary.get('images_sampled', 0)} images "
@@ -482,6 +496,7 @@ class MainWindow(QMainWindow):
 
     def on_optimised(self, result: dict) -> None:
         """Offer the winner. Applying it is the same path a loaded file takes."""
+        self.dataset = None
         changed = result.get("changed") or {}
         parts = result.get("parts") or {}
         lines = "\n".join(f"    {k} = {v}" for k, v in sorted(changed.items()))

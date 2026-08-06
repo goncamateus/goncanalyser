@@ -231,15 +231,18 @@ to half a million keypoint rows, which would cost more memory than the video.
 Everything above shows you what the current settings *do*. This is the only part
 that knows what they *should* do, because it is the only part with ground truth.
 
-**Analyse dataset…** in the menu bar (`Ctrl+D`) takes a COCO segmentation
-dataset — an `instances_*.json` and the folder of images it describes — and
-offers two verbs over the same inputs.
+The **Dataset** menu holds two of them: **Analyse** (`Ctrl+D`) and **Optimise**
+(`Ctrl+Shift+D`). Both take a COCO segmentation dataset — an `instances_*.json`
+and the folder of images it describes — and there the resemblance ends. They ask
+different questions, write different output, and depend on different packages, so
+they are two entries rather than one dialog with a mode.
 
-Optional: `uv sync --group dataset` installs matplotlib and optuna. Without them
-the button explains that instead of failing, and the packaged desktop build
-deliberately ships without them. COCO itself needs no dependency at all —
-annotations are plain JSON, polygons are `cv2.fillPoly`, and crowd RLE is eight
-lines.
+Optional: `uv sync --group dataset` installs matplotlib and optuna. Analyse needs
+only the first, Optimise only the second, and each says which one is missing
+rather than naming the group. The packaged desktop build ships without either and
+still opens images. COCO itself needs no dependency at all — annotations are plain
+JSON, polygons are `cv2.fillPoly`, and RLE decodes in about thirty lines,
+including the compressed form that most export tools actually write.
 
 **Analyse** surveys the dataset in two passes, split because they cost three
 orders of magnitude apart. Every annotation in the file is cheap, so all of them
@@ -260,6 +263,15 @@ masks, scoring
 ```
 f(θ) = α·IoU(Mθ, Mgt) + β·|Mθ ∩ Mgt|/|Mgt| − γ·|Mθ \ Mgt|/|I \ Mgt|
 ```
+
+**γ needs raising on small objects.** Its penalty is divided by the background,
+and when objects are ~1% of the frame the background is nearly everything, so a
+mask covering ten times the ground truth is charged almost nothing. On the sample
+plume set the default weights score a 9.9%-coverage mask at 0.5126 and a tight
+1.6% one at 0.5156 — half a percent apart for a threefold difference in IoU, which
+is far too flat for the sampler to climb. At γ=5 the same search returns IoU 0.30
+instead of 0.09. The result reports IoU, recall, spill and coverage separately for
+exactly this reason, and says so when the mask comes back over-segmented.
 
 IoU alone would do for a benchmark. β pays for coverage, so a timid threshold
 that finds a clean sliver of every object cannot win; γ charges for spilled
@@ -309,8 +321,8 @@ current value, so an export from an older build still loads.
 
 `space` play/pause · `.` step forward · `,` step back · `Ctrl+O` open ·
 `Ctrl+Shift+O` open folder · `Ctrl+L` load settings ·
-`Ctrl+S` export · `Ctrl+D` analyse dataset · `Ctrl+R` reset all controls ·
-`Ctrl+W` close (`⌘W` on macOS,
+`Ctrl+S` export · `Ctrl+D` analyse dataset · `Ctrl+Shift+D` optimise against one ·
+`Ctrl+R` reset all controls · `Ctrl+W` close (`⌘W` on macOS,
 where Qt maps Ctrl onto Command — so these are `⌘S`, `⌘L`, `⌘R` there)
 
 `Ctrl+R` does not ask for confirmation — a shortcut that stops to ask is not

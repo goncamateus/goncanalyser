@@ -34,6 +34,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import optuna
 
 from core.pipeline import analyse as run_chain
 from core.settings import Settings
@@ -197,8 +198,6 @@ def search(
     objective stochastic — two trials could then differ only in which images they
     happened to be scored on, which is not a comparison.
     """
-    import optuna
-
     # Optuna logs a paragraph per trial at INFO. A hundred trials of it buries
     # whatever the app itself has to say.
     optuna.logging.set_verbosity(optuna.logging.WARNING)

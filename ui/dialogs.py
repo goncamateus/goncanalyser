@@ -128,30 +128,28 @@ class ExportDialog(QDialog):
         return dialog.choices()
 
 
-class DatasetDialog(QDialog):
-    """Where the ground truth is, and which of the two things to do with it.
+class _DatasetInputs(QDialog):
+    """Where the ground truth is. Shared by both dataset jobs, run by neither.
 
-    One dialog, two verbs. Surveying a dataset and tuning against it need exactly
-    the same three paths, the same sample and the same class filter; two nav
-    buttons would mean typing all of that twice to answer two halves of one
-    question.
+    Surveying a dataset and tuning against it are separate questions with
+    separate answers — and separate dependencies, since only one of them needs
+    matplotlib and only the other needs optuna. What they do share is *where the
+    data is*, so that part lives here and the verbs subclass it rather than one
+    dialog growing a mode.
     """
 
-    def __init__(self, parent):
+    def __init__(self, parent, title: str, note: str):
         super().__init__(parent)
-        self.setWindowTitle("Analyse dataset")
+        self.setWindowTitle(title)
         self.setMinimumWidth(560)
-        self.mode = "analyse"
 
         self.annotations, ann_row = self._pick("instances_val2017.json…", self._browse_json)
         self.images, images_row = self._pick("the folder those images live in…", self._browse_images)
-        self.folder, out_row = self._pick("where to write the report…", self._browse_out)
+        self.folder, out_row = self._pick("where to write the results…", self._browse_out)
 
         self.count = QSpinBox()
         self.count.setRange(1, 100_000)
         self.count.setValue(150)
-        self.count.setToolTip("images decoded for the pixel metrics; the annotation\n"
-                              "statistics always cover the whole file")
         # ponytail: typed, not a combo box. Filling a combo means parsing the whole
         # 45 MB annotation file inside the dialog to read one key. The worker
         # validates the name and its error lists every valid one, which is the same
@@ -159,70 +157,35 @@ class DatasetDialog(QDialog):
         self.category = QLineEdit()
         self.category.setPlaceholderText("blank = every class")
 
-        inputs = QFormLayout()
-        inputs.addRow("Annotations", ann_row)
-        inputs.addRow("Images folder", images_row)
-        inputs.addRow("Output folder", out_row)
-        inputs.addRow("Images to sample", self.count)
-        inputs.addRow("Class", self.category)
-
-        self.trials = QSpinBox()
-        self.trials.setRange(5, 5000)
-        self.trials.setValue(100)
-        self.weights = []
-        weights_row = QHBoxLayout()
-        for name, value, tip in (
-            ("α IoU", 1.0, "overlap between the predicted and the true mask"),
-            ("β recall", 0.5, "share of the true mask that was found"),
-            ("γ spill", 0.5, "share of the background wrongly included"),
-        ):
-            box = QDoubleSpinBox()
-            box.setRange(0.0, 10.0)
-            box.setSingleStep(0.1)
-            box.setValue(value)
-            box.setToolTip(tip)
-            self.weights.append(box)
-            weights_row.addWidget(QLabel(name))
-            weights_row.addWidget(box)
-
-        tuning = QGroupBox("Optimise only")
-        column = QVBoxLayout(tuning)
         form = QFormLayout()
-        form.addRow("Trials", self.trials)
-        column.addLayout(form)
-        column.addWidget(QLabel("<b>Objective</b>  f = α·IoU + β·recall − γ·background spill"))
-        column.addLayout(weights_row)
-        column.addWidget(
-            QLabel(
-                "<i>Searches the twelve parameters that reach the contour mask: every "
-                "Image Adjustment knob, plus the contour mode and minimum area. HOG, "
-                "LBP, SIFT, ORB, edges, Hough, corners and blobs describe the frame "
-                "rather than segmenting it, so they cannot change the score.</i>"
-            )
-        )
+        form.addRow("Annotations", ann_row)
+        form.addRow("Images folder", images_row)
+        form.addRow("Output folder", out_row)
+        form.addRow("Images to sample", self.count)
+        form.addRow("Class", self.category)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        self.analyse = buttons.addButton("Analyse", QDialogButtonBox.ButtonRole.AcceptRole)
-        self.optimise = buttons.addButton("Optimise", QDialogButtonBox.ButtonRole.AcceptRole)
-        self.analyse.clicked.connect(lambda: setattr(self, "mode", "analyse"))
-        self.optimise.clicked.connect(lambda: setattr(self, "mode", "optimise"))
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        page = QVBoxLayout(self)
-        page.addWidget(QLabel("<b>COCO segmentation dataset</b>"))
-        page.addLayout(inputs)
-        page.addWidget(tuning)
-        page.addWidget(
-            QLabel(
-                "<i>Analyse decodes the sample once. Optimise decodes it once and then "
-                "re-runs the chain over it every trial — trials × images frames.</i>"
-            )
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        page.addWidget(buttons)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+        self.page = QVBoxLayout(self)
+        self.page.addWidget(QLabel("<b>COCO segmentation dataset</b>"))
+        self.page.addLayout(form)
+        # Subclasses insert their own controls here, between the paths and the
+        # closing note, by appending to `page` before `finish()` adds the buttons.
+        self.note = QLabel(f"<i>{note}</i>")
+        self.note.setWordWrap(True)
 
         for widget in (self.annotations, self.images, self.folder):
             widget.textChanged.connect(self._refresh)
+
+    def finish(self) -> None:
+        """Close the layout. Called by each subclass once its own rows are in."""
+        self.page.addWidget(self.note)
+        self.page.addWidget(self.buttons)
         self._refresh()
 
     def _pick(self, placeholder: str, slot) -> tuple[QLineEdit, QHBoxLayout]:
@@ -242,10 +205,13 @@ class DatasetDialog(QDialog):
         )
         if path:
             self.annotations.setText(path)
-            # The images almost always sit beside the annotations in a sibling
-            # folder named after the split — instances_val2017.json next to
-            # val2017/. Guessing it right is free; guessing it wrong costs a click.
-            guess = Path(path).parent.parent / Path(path).stem.split("_")[-1]
+            # The images almost always sit beside the annotations — either in the
+            # same folder, as a Roboflow export does, or in a sibling named after
+            # the split, as instances_val2017.json next to val2017/. Guessing right
+            # is free; guessing wrong costs one click.
+            here = Path(path).parent
+            split = here.parent / Path(path).stem.split("_")[-1]
+            guess = split if split.is_dir() else here
             if guess.is_dir() and not self.images.text():
                 self.images.setText(str(guess))
 
@@ -255,35 +221,110 @@ class DatasetDialog(QDialog):
             self.images.setText(chosen)
 
     def _browse_out(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Write the report to…")
+        chosen = QFileDialog.getExistingDirectory(self, "Write the results to…")
         if chosen:
             self.folder.setText(chosen)
 
     def _refresh(self) -> None:
-        ready = all(w.text() for w in (self.annotations, self.images, self.folder))
-        self.analyse.setEnabled(ready)
-        self.optimise.setEnabled(ready)
+        self.ok.setEnabled(all(w.text() for w in (self.annotations, self.images, self.folder)))
 
-    def choices(self) -> tuple[str, dict]:
-        """(mode, keyword arguments for the job). `seed` is the window's to add."""
-        options = {
+    def options(self) -> dict:
+        """Keyword arguments for the job. Subclasses add their own."""
+        return {
             "ann_path": self.annotations.text(),
             "images_dir": self.images.text(),
             "out_dir": self.folder.text(),
             "n": self.count.value(),
             "category": self.category.text().strip(),
         }
-        if self.mode == "optimise":
-            options["trials"] = self.trials.value()
-            options["weights"] = tuple(box.value() for box in self.weights)
-        return self.mode, options
 
-    @staticmethod
-    def ask(parent) -> tuple[str, dict] | None:
-        dialog = DatasetDialog(parent)
+    @classmethod
+    def ask(cls, parent) -> dict | None:
+        dialog = cls(parent)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return dialog.choices()
+        return dialog.options()
+
+
+class AnalyseDialog(_DatasetInputs):
+    """Survey what separates annotated pixels from their background."""
+
+    def __init__(self, parent):
+        super().__init__(
+            parent,
+            "Analyse dataset",
+            "The annotation statistics cover the whole file. The colour, texture, "
+            "frequency and heatmap panels are measured over the sample, which is "
+            "decoded once.",
+        )
+        self.count.setToolTip(
+            "images decoded for the pixel metrics; the annotation\n"
+            "statistics always cover the whole file"
+        )
+        self.finish()
+
+
+class OptimiseDialog(_DatasetInputs):
+    """Search the settings that best reproduce the ground-truth masks."""
+
+    def __init__(self, parent):
+        super().__init__(
+            parent,
+            "Optimise against dataset",
+            "The sample is decoded once, then the chain re-runs over it every "
+            "trial — trials × images frames.",
+        )
+        self.count.setValue(50)  # every trial pays for this one, unlike a survey
+        self.count.setToolTip("images every trial is scored over")
+
+        self.trials = QSpinBox()
+        self.trials.setRange(5, 5000)
+        self.trials.setValue(100)
+
+        self.weights = []
+        weights_row = QHBoxLayout()
+        for name, value, tip in (
+            ("α IoU", 1.0, "overlap between the predicted and the true mask"),
+            ("β recall", 0.5, "share of the true mask that was found"),
+            ("γ spill", 0.5, "share of the background wrongly included"),
+        ):
+            box = QDoubleSpinBox()
+            box.setRange(0.0, 100.0)
+            box.setSingleStep(0.5)
+            box.setValue(value)
+            box.setToolTip(tip)
+            self.weights.append(box)
+            weights_row.addWidget(QLabel(name))
+            weights_row.addWidget(box)
+
+        group = QGroupBox("Search")
+        column = QVBoxLayout(group)
+        form = QFormLayout()
+        form.addRow("Trials", self.trials)
+        column.addLayout(form)
+        column.addWidget(QLabel("<b>Objective</b>  f = α·IoU + β·recall − γ·background spill"))
+        column.addLayout(weights_row)
+        hint = QLabel(
+            "<i>γ is divided by the background, so on small objects it barely "
+            "penalises a mask that covers everything — raise it well above 1 when "
+            "the result comes back over-segmented.<br><br>"
+            "Searches the twelve parameters that reach the contour mask: every "
+            "Image Adjustment knob, plus the contour mode and minimum area. HOG, "
+            "LBP, SIFT, ORB, edges, Hough, corners and blobs describe the frame "
+            "rather than segmenting it, so they cannot change the score.</i>"
+        )
+        hint.setWordWrap(True)
+        column.addWidget(hint)
+
+        self.page.addWidget(group)
+        self.finish()
+
+    def options(self) -> dict:
+        return {
+            **super().options(),
+            "trials": self.trials.value(),
+            "weights": tuple(box.value() for box in self.weights),
+        }
 
 
 class DashboardDialog(QDialog):
