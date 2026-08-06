@@ -7,6 +7,14 @@ report.json
 *.csv
 overlays/
 objects/
+
+# Dataset work. The annotations and images are the input and belong wherever you
+# keep your data; the reports are output and regenerate from them in minutes.
+sample/
+summary.json
+best_settings.json
+*-analysed/
+*_report/
 .venv/
 __pycache__/
 *.egg-info/
