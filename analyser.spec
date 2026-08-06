@@ -32,7 +32,13 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter"],
+    # matplotlib and optuna belong to the optional `dataset` group and are not part
+    # of the app: `main.py` imports matplotlib under try/except only to claim
+    # libfreetype ahead of Qt, and `dataset/` is imported by name at call time.
+    # Excluded so a build machine that happens to have the group synced does not
+    # quietly fold fifty megabytes of them into the bundle. Dropping them here is
+    # what makes the "install with uv sync --group dataset" message the truth.
+    excludes=["tkinter", "matplotlib", "optuna", "dataset"],
     noarchive=False,
 )
 
