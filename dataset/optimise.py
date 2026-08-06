@@ -102,6 +102,35 @@ def evaluate(samples: list, s: Settings, weights: tuple = WEIGHTS) -> float:
         return -1.0
 
 
+def decompose(samples: list, s: Settings) -> dict:
+    """The three terms of f(θ) separately, plus how much frame the mask covers.
+
+    f(θ) on its own cannot tell an accurate mask from one that swallows the
+    frame. On a dataset whose objects are ~1% of the image, a mask covering ten
+    times the ground truth scores within half a percent of a tight one, because
+    the spill term is divided by the background and the background is nearly
+    everything. These are the numbers that do separate them, and `coverage`
+    against `truth` is the one to read first: ten times larger is ten times
+    larger no matter what the weighted total says.
+    """
+    iou, recall, spill, coverage, truth = [], [], [], [], []
+    for _, bgr, gt in samples:
+        p, t = predict(bgr, s) > 0, gt > 0
+        hit = np.count_nonzero(p & t)
+        iou.append(hit / (np.count_nonzero(p | t) or 1))
+        recall.append(hit / (np.count_nonzero(t) or 1))
+        spill.append(np.count_nonzero(p & ~t) / (np.count_nonzero(~t) or 1))
+        coverage.append(np.count_nonzero(p) / p.size)
+        truth.append(np.count_nonzero(t) / t.size)
+    return {
+        "iou": round(float(np.mean(iou)), 4),
+        "recall": round(float(np.mean(recall)), 4),
+        "spill": round(float(np.mean(spill)), 4),
+        "coverage": round(float(np.mean(coverage)), 4),
+        "truth": round(float(np.mean(truth)), 4),
+    }
+
+
 def settings_of(params: dict, base: Settings | None = None) -> Settings:
     """A trial's parameters as a full `Settings`, with the pinned values applied."""
     return replace(base or Settings(), **params, **PINNED)
@@ -208,6 +237,7 @@ def search(
     (out / "best_settings.json").write_text(
         json.dumps({"source": ann_path, "frames": len(samples), "settings": values}, indent=2) + "\n"
     )
+    parts = decompose(samples, best)
     return {
         "dir": str(out),
         "best": values,
@@ -216,6 +246,11 @@ def search(
         "images": len(samples),
         "trials": int(trials),
         "weights": list(weights),
+        "parts": parts,
+        # The winner covering far more frame than the ground truth means the
+        # spill weight is too small to bite on objects this size, not that the
+        # search failed. Said here because a single score cannot show it.
+        "oversegmented": parts["coverage"] > 3 * parts["truth"],
         "changed": {k: v for k, v in values.items() if v != getattr(baseline, k)},
         "written": ["best_settings.json"],
     }

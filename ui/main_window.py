@@ -483,12 +483,29 @@ class MainWindow(QMainWindow):
     def on_optimised(self, result: dict) -> None:
         """Offer the winner. Applying it is the same path a loaded file takes."""
         changed = result.get("changed") or {}
+        parts = result.get("parts") or {}
         lines = "\n".join(f"    {k} = {v}" for k, v in sorted(changed.items()))
+        detail = ""
+        if parts:
+            detail = (
+                f"\nIoU {parts['iou']}   recall {parts['recall']}   "
+                f"background spill {parts['spill']}\n"
+                f"The mask covers {parts['coverage'] * 100:.1f}% of the frame; "
+                f"the ground truth covers {parts['truth'] * 100:.1f}%.\n"
+            )
+        if result.get("oversegmented"):
+            detail += (
+                "\nThat is a lot more than the ground truth. The spill term is "
+                "divided by the background, so on objects this small it barely "
+                "penalises a mask that covers everything. Raise γ and run again "
+                "if you want a tighter mask.\n"
+            )
         box = QMessageBox(self)
         box.setWindowTitle("Optimisation finished")
         box.setText(
             f"Best f(θ) = {result.get('score')} over {result.get('images')} images, "
-            f"up from {result.get('baseline')} at the current settings.\n\n"
+            f"up from {result.get('baseline')} at the current settings.\n"
+            f"{detail}\n"
             f"{len(changed)} parameters changed:\n{lines}\n\n"
             f"Saved to {result.get('dir')}/best_settings.json"
         )
