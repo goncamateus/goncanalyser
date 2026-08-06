@@ -226,7 +226,10 @@ def search(
     for done in range(1, int(trials) + 1):
         trial = study.ask()
         study.tell(trial, evaluate(samples, settings_of(_suggest(trial)), weights))
-        yield done, int(trials)
+        # The best score so far, not just the count. A search is minutes long and
+        # the count alone cannot answer the only question worth asking while it
+        # runs, which is whether it is still finding anything.
+        yield done, int(trials), f"trial {done}/{trials} · best f = {study.best_value:.4f}"
 
     # Through the same snap the trials went through, or the winner comes back off
     # the grid — `best_params` returns what Optuna stored, not what was evaluated.
@@ -298,7 +301,12 @@ def _demo() -> None:
                 seen.append(next(steps))
             except StopIteration as finished:
                 result = finished.value
-        assert seen[0] == (1, 25) and seen[-1] == (25, 25), (seen[0], seen[-1])
+        assert seen[0][:2] == (1, 25) and seen[-1][:2] == (25, 25), (seen[0], seen[-1])
+        # The label carries the best score so far, which is the only thing worth
+        # watching during a search — and it may only ever improve.
+        scores = [float(note.rsplit("= ", 1)[1]) for _, _, note in seen]
+        assert scores == sorted(scores), "best-so-far went backwards"
+        assert scores[-1] == result["score"], (scores[-1], result["score"])
 
         # The fixture is bright squares on dark noise, so a threshold exists that
         # nearly nails it. A study that cannot beat the defaults is not searching.

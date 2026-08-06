@@ -500,7 +500,7 @@ def analyse(ann_path: str, images_dir: str, out_dir: str, n: int = 200, category
         got = read(coco, images_dir, image_id, cat)
         if got is not None:
             pixels.add(got[1], got[2])
-        yield done, total
+        yield done, total, f"{pixels.images} of {done} images measured"
 
     summary = {
         "annotations": sum(len(a) for a in coco.anns.values()),
@@ -549,7 +549,10 @@ def _demo() -> None:
                 seen.append(next(steps))
             except StopIteration as finished:
                 result = finished.value
-        assert seen == [(1, 4), (2, 4), (3, 4), (4, 4)], seen
+        # Ticks carry a label as well as a count — it is what the job window
+        # shows, and a survey's is how many of the images seen were usable.
+        assert [(a, b) for a, b, _ in seen] == [(1, 4), (2, 4), (3, 4), (4, 4)], seen
+        assert seen[-1][2] == "4 of 4 images measured", seen[-1]
 
         assert result["figures"] == [f"{n}.png" for n in FIGURES], result["figures"]
         assert json.dumps(result), "the result must be plain data — it crosses a signal"

@@ -201,26 +201,41 @@ class DatasetThread(QThread):
     is about to run, which is also where a missing optional group gets reported.
     """
 
-    progress = pyqtSignal(int, int)  # done, total
+    progress = pyqtSignal(int, int, str)  # done, total, what it is doing
     finished_with = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
     def __init__(self, job, options: dict):
         super().__init__()
-        self.job = job  # a generator function yielding (done, total)
+        self.job = job  # a generator function yielding (done, total[, label])
         self.options = options
 
     def run(self) -> None:
+        steps = None
         try:
             steps = self.job(**self.options)
             while True:
+                # Cooperative, and Qt's own flag rather than one of ours. These
+                # jobs are minutes long, so quitting the window has to be able to
+                # end one — and terminating a thread mid-`cv2` is not a way to do
+                # that. The generator is closed so its `finally` still runs.
+                if self.isInterruptionRequested():
+                    return
+
                 try:
-                    done, total = next(steps)
+                    tick = next(steps)
                 except StopIteration as finished:
                     self.finished_with.emit(finished.value or {})
                     return
-                self.progress.emit(done, total)
+                # Two-tuple or three: a survey has nothing to say per image, a
+                # search has its best score so far, and `report.write` predates
+                # both. Normalising here keeps that out of every generator.
+                done, total, *rest = tick
+                self.progress.emit(done, total, rest[0] if rest else "")
         # KeyError is a malformed annotation file — one missing "bbox" three
         # hundred images in should not take the application down.
         except (OSError, ValueError, KeyError) as exc:
             self.failed.emit(str(exc))
+        finally:
+            if steps is not None:
+                steps.close()

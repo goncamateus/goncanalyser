@@ -53,6 +53,7 @@ ui/
   controls/
     base.py                Knob, Section, Preview, and the widget factories
     adjust.py globals.py local.py structures.py motion.py    one tab each
+  progress.py              the status-bar pie and the dismissible job window
   viewer.py                the image label, plus the rubber-band region drag
 ```
 
@@ -257,6 +258,14 @@ they have to be told apart from, and taking both from one frame cancels exposure
 and scene content out of the comparison. Five figures and a `summary.json` land
 in the output folder and open in a dashboard.
 
+Both run on a worker thread behind a **modeless** window: a progress bar, elapsed
+and estimated time, and — for a search — the best score so far, which is the only
+thing worth watching while one runs. Its **Hide** button hides the window and
+nothing else. A pie in the corner of the status bar fills for as long as the job
+does and brings the window back when clicked, so dismissing it cannot lose track
+of work that takes ten minutes. Closing the app asks a running job to stop rather
+than waiting for it.
+
 **Optimise** searches for the settings that best reproduce the ground-truth
 masks, scoring
 
@@ -347,6 +356,7 @@ uv run python -m features.motion    # all six see a moving square and none see a
 uv run python -m features.report    # JSON and CSV round-trip, driven like ReportThread
 uv run python -m ui.viewer          # widget->image mapping, both letterbox orientations
 uv run python -m ui.controls.base   # groups are siblings; every Settings field has a knob
+uv run python -m ui.progress        # the pie sweeps; hiding the job window keeps it
 ```
 
 The `dataset` package needs its group, and builds its own COCO fixture — bright

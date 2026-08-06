@@ -51,6 +51,7 @@ from .dialogs import (
     open_settings,
     open_source,
 )
+from .progress import JobDialog, PieProgress
 from .viewer import Viewer
 
 PANEL_WIDTH = 400
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self.worker: Worker | None = None  # set at the end of __init__
         self.exporter: ReportThread | None = None
         self.dataset: DatasetThread | None = None
+        self.job: JobDialog | None = None  # the running job's window, if any
         self.frames = 0
         self._undo: dict | None = None  # settings from before the last Ctrl+R
 
@@ -104,6 +106,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self._menus()
         self.setWindowTitle(f"Analyser — {source.path}")
+        self.pie = PieProgress()
+        self.pie.clicked.connect(self.show_job)
+        self.statusBar().addPermanentWidget(self.pie)
         self.statusBar().showMessage("starting…")
 
         # Every tab routes to the one method that rebuilds Settings.
@@ -472,21 +477,44 @@ class MainWindow(QMainWindow):
         """Ask for the inputs, then drive one dataset job on its own thread."""
         if self.dataset is not None:
             self.statusBar().showMessage("a dataset job is already running")
+            self.show_job()  # they probably hid it and forgot, so put it back
             return
         options = dialog.ask(self)
         if options is None:
             return
 
+        self.job = JobDialog(self, verb.capitalize(), f"{verb.capitalize()} a dataset.")
         self.dataset = DatasetThread(job, {**options, **extra})
-        self.dataset.progress.connect(
-            lambda at, total: self.statusBar().showMessage(f"{verb} {at}/{total}…")
-        )
+        self.dataset.progress.connect(self.on_dataset_progress)
         self.dataset.finished_with.connect(done)
         self.dataset.failed.connect(self.on_dataset_failed)
         self.dataset.start()
+        self.job.show()
+
+    def on_dataset_progress(self, at: int, total: int, label: str) -> None:
+        """One tick, to all three places that show it."""
+        self.pie.track(at, total, label)
+        if self.job is not None:
+            self.job.track(at, total, label)
+        self.statusBar().showMessage(label or f"{at}/{total}…")
+
+    def show_job(self) -> None:
+        """The pie was clicked. Bring the running job's window back to the front."""
+        if self.job is not None:
+            self.job.show()
+            self.job.raise_()
+            self.job.activateWindow()
+
+    def _end_dataset(self) -> None:
+        """Whatever happened, the job is over: clear the thread, pie and window."""
+        self.dataset = None
+        self.pie.hide()
+        if self.job is not None:
+            self.job.deleteLater()
+            self.job = None
 
     def on_analysed(self, result: dict) -> None:
-        self.dataset = None
+        self._end_dataset()
         summary = result.get("summary", {})
         self.statusBar().showMessage(
             f"analysed {summary.get('images_sampled', 0)} images "
@@ -496,7 +524,7 @@ class MainWindow(QMainWindow):
 
     def on_optimised(self, result: dict) -> None:
         """Offer the winner. Applying it is the same path a loaded file takes."""
-        self.dataset = None
+        self._end_dataset()
         changed = result.get("changed") or {}
         parts = result.get("parts") or {}
         lines = "\n".join(f"    {k} = {v}" for k, v in sorted(changed.items()))
@@ -532,7 +560,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"optimised settings applied — f(θ) = {result.get('score')}")
 
     def on_dataset_failed(self, message: str) -> None:
-        self.dataset = None
+        self._end_dataset()
         QMessageBox.warning(self, "Dataset analysis failed", message)
 
     # --- transport ----------------------------------------------------------
@@ -586,6 +614,10 @@ class MainWindow(QMainWindow):
         if self.exporter is not None:
             self.exporter.wait()
         if self.dataset is not None:
+            # Ask first, then join. A survey of six hundred images is minutes of
+            # waiting, and a window that will not close is indistinguishable from
+            # one that has hung — the more so now the job's own window can be hidden.
+            self.dataset.requestInterruption()
             self.dataset.wait()
         self.source.release()
         save_cached(self.settings)
