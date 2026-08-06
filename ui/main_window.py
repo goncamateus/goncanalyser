@@ -106,8 +106,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self._menus()
         self.setWindowTitle(f"Analyser — {source.path}")
+        # The dataset jobs get their own corner of the status bar. They cannot
+        # share `showMessage` with the frame worker, which writes a line there on
+        # every frame — a hundred a second even while paused — and would wipe
+        # anything they had to say before it could be read.
         self.pie = PieProgress()
         self.pie.clicked.connect(self.show_job)
+        self.job_status = QLabel()
+        self.statusBar().addPermanentWidget(self.job_status)
         self.statusBar().addPermanentWidget(self.pie)
         self.statusBar().showMessage("starting…")
 
@@ -476,27 +482,43 @@ class MainWindow(QMainWindow):
     def _run_dataset(self, job, dialog, verb: str, done, **extra) -> None:
         """Ask for the inputs, then drive one dataset job on its own thread."""
         if self.dataset is not None:
-            self.statusBar().showMessage("a dataset job is already running")
+            self._say("a dataset job is already running")
             self.show_job()  # they probably hid it and forgot, so put it back
             return
         options = dialog.ask(self)
         if options is None:
             return
+        self._say("")
 
         self.job = JobDialog(self, verb.capitalize(), f"{verb.capitalize()} a dataset.")
         self.dataset = DatasetThread(job, {**options, **extra})
+        self.job.cancelled.connect(self.cancel_dataset)
         self.dataset.progress.connect(self.on_dataset_progress)
         self.dataset.finished_with.connect(done)
         self.dataset.failed.connect(self.on_dataset_failed)
+        # Qt's own signal, emitted whenever run() returns — including the cancelled
+        # case, which produces no result and so reaches neither slot above. Without
+        # it a stopped job would leave its pie up and block the next one forever.
+        self.dataset.finished.connect(self._end_dataset)
         self.dataset.start()
         self.job.show()
+
+    def cancel_dataset(self) -> None:
+        """Ask the running job to stop. It ends after the step already in flight."""
+        if self.dataset is not None:
+            self.dataset.requestInterruption()
+            self._say("stopping the dataset job…")
+
+    def _say(self, text: str) -> None:
+        """Say something the frame worker will not immediately talk over."""
+        self.job_status.setText(text)
 
     def on_dataset_progress(self, at: int, total: int, label: str) -> None:
         """One tick, to all three places that show it."""
         self.pie.track(at, total, label)
         if self.job is not None:
             self.job.track(at, total, label)
-        self.statusBar().showMessage(label or f"{at}/{total}…")
+        self._say(label or f"{at}/{total}…")
 
     def show_job(self) -> None:
         """The pie was clicked. Bring the running job's window back to the front."""
@@ -506,7 +528,17 @@ class MainWindow(QMainWindow):
             self.job.activateWindow()
 
     def _end_dataset(self) -> None:
-        """Whatever happened, the job is over: clear the thread, pie and window."""
+        """Whatever happened, the job is over: clear the thread, pie and window.
+
+        Idempotent, because it runs twice on a normal finish — once from the slot
+        that got the result, once from the thread's own `finished` — and only once
+        when the job was cancelled, which is the case that needs the second.
+        """
+        # Asked of the dialog, not the thread. `QThread.isInterruptionRequested`
+        # reports false once the thread has finished, and by the time this runs it
+        # always has — so the flag that survives is the one recording the click.
+        if self.job is not None and self.job.stopping:
+            self._say("dataset job cancelled")
         self.dataset = None
         self.pie.hide()
         if self.job is not None:
@@ -516,9 +548,9 @@ class MainWindow(QMainWindow):
     def on_analysed(self, result: dict) -> None:
         self._end_dataset()
         summary = result.get("summary", {})
-        self.statusBar().showMessage(
+        self._say(
             f"analysed {summary.get('images_sampled', 0)} images "
-            f"({summary.get('annotations', 0)} annotations) — {result.get('dir')}"
+            f"({summary.get('annotations', 0)} annotations)"
         )
         DashboardDialog(self, result).exec()
 
@@ -557,7 +589,7 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() is apply:
             self.apply_settings(result["best"])
-            self.statusBar().showMessage(f"optimised settings applied — f(θ) = {result.get('score')}")
+            self._say(f"optimised settings applied — f(θ) = {result.get('score')}")
 
     def on_dataset_failed(self, message: str) -> None:
         self._end_dataset()

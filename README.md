@@ -260,11 +260,16 @@ in the output folder and open in a dashboard.
 
 Both run on a worker thread behind a **modeless** window: a progress bar, elapsed
 and estimated time, and — for a search — the best score so far, which is the only
-thing worth watching while one runs. Its **Hide** button hides the window and
-nothing else. A pie in the corner of the status bar fills for as long as the job
-does and brings the window back when clicked, so dismissing it cannot lose track
-of work that takes ten minutes. Closing the app asks a running job to stop rather
-than waiting for it.
+thing worth watching while one runs. Two buttons that sound alike and are not: **Hide** puts the window away and
+leaves the work running, **Cancel** stops it. Cancelling is cooperative, so it
+takes effect at the end of the step in flight — one trial, or one image.
+
+A pie with its percentage sits in the corner of the status bar for as long as the
+job does, and clicking it brings the window back, so hiding cannot lose track of
+work that takes ten minutes. It has its own label beside it rather than sharing
+`showMessage` with the frame worker, which writes there on every frame — a hundred
+a second even while paused — and would wipe anything a job had to say. Closing the
+app cancels a running job rather than waiting for it.
 
 **Optimise** searches for the settings that best reproduce the ground-truth
 masks, scoring

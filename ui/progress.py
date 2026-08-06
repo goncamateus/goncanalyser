@@ -13,7 +13,7 @@ circle in the corner until it finishes.
 
 import time
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QPainter, QPen
 from PyQt6.QtWidgets import (
     QDialog,
@@ -24,16 +24,22 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-PIE = 16  # diameter in px; the status bar is not tall, so neither is this
+PIE = 18  # diameter in px. The status bar grows to fit it, so this sets the height.
+TEXT = 40  # room for "100%" beside it
+PAD = 8  # trailing gap, so it does not sit under the corner resize grip
 
 
 class PieProgress(QWidget):
-    """A small filling pie. Click it to bring its job's window back.
+    """A filling pie with its percentage. Click to bring its job's window back.
 
     Painted rather than assembled: Qt has a progress *bar* and no progress pie,
     and `drawPie` with an arc length is the whole of it. Colours come from the
     palette so it follows the platform theme instead of picking a blue that is
     wrong on half of them.
+
+    It carries its own percentage because a bare circle this size is a coloured
+    dot in the corner of a status bar — findable once you know it is there, and
+    invisible until then. The number is what makes it read as progress.
     """
 
     clicked = pyqtSignal()
@@ -41,21 +47,26 @@ class PieProgress(QWidget):
     def __init__(self, size: int = PIE):
         super().__init__()
         self.done = self.total = 0
-        self.setFixedSize(size, size)
+        self.share = ""
+        self.diameter = size
+        self.setFixedSize(size + TEXT + PAD, size)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.hide()
 
+    def sizeHint(self) -> QSize:
+        return QSize(self.diameter + TEXT + PAD, self.diameter)
+
     def track(self, done: int, total: int, label: str = "") -> None:
         self.done, self.total = done, total
-        share = f"{done / total:.0%}" if total else "…"
-        self.setToolTip(f"{label} {done}/{total} ({share}) — click to show".strip())
+        self.share = f"{done / total:.0%}" if total else "…"
+        self.setToolTip(f"{label} {done}/{total} ({self.share}) — click to show".strip())
         self.setVisible(True)
         self.update()  # repaint, not recompute; QWidget.update is a paint request
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        circle = self.rect().adjusted(1, 1, -1, -1)
+        circle = QRect(0, 0, self.diameter, self.diameter).adjusted(1, 1, -1, -1)
 
         painter.setPen(QPen(self.palette().mid().color(), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -68,6 +79,13 @@ class PieProgress(QWidget):
             # from twelve o'clock, which is the direction a clock face implies.
             painter.drawPie(circle, 90 * 16, -int(360 * 16 * self.done / self.total))
 
+        painter.setPen(self.palette().windowText().color())
+        painter.drawText(
+            QRect(self.diameter + 4, 0, TEXT, self.diameter),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            self.share,
+        )
+
     def mousePressEvent(self, _event) -> None:
         self.clicked.emit()
 
@@ -75,10 +93,14 @@ class PieProgress(QWidget):
 class JobDialog(QDialog):
     """Modeless progress for one long job. Hiding it does not stop anything.
 
-    Deliberately carries no Cancel. Stopping is the window's business — it asks
-    the thread to interrupt itself on close — and a button here that only *looked*
-    like it stopped the work would be worse than none.
+    Two buttons that sound similar and are not: **Hide** puts the window away and
+    leaves the work running; **Cancel** stops the work. Cancelling is cooperative,
+    so it takes effect at the end of the step in flight — one trial for a search,
+    one image for a survey — and the window says "stopping…" rather than
+    pretending it was instant.
     """
+
+    cancelled = pyqtSignal()
 
     def __init__(self, parent, title: str, note: str):
         super().__init__(parent)
@@ -86,6 +108,7 @@ class JobDialog(QDialog):
         self.setModal(False)
         self.setMinimumWidth(420)
         self._started = time.monotonic()
+        self.stopping = False
 
         self.bar = QProgressBar()
         self.bar.setRange(0, 0)  # indeterminate until the first tick arrives
@@ -94,6 +117,8 @@ class JobDialog(QDialog):
 
         buttons = QDialogButtonBox()
         buttons.addButton("Hide", QDialogButtonBox.ButtonRole.RejectRole)
+        self.cancel = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.DestructiveRole)
+        self.cancel.clicked.connect(self._cancel)
         buttons.rejected.connect(self.hide)
 
         column = QVBoxLayout(self)
@@ -106,7 +131,17 @@ class JobDialog(QDialog):
         )
         column.addWidget(buttons)
 
+    def _cancel(self) -> None:
+        """Ask for a stop and say so. The window does not own the thread."""
+        self.stopping = True
+        self.cancel.setEnabled(False)
+        self.bar.setRange(0, 0)  # back to indeterminate: the count no longer means anything
+        self.detail.setText("stopping — finishing the step already running…")
+        self.cancelled.emit()
+
     def track(self, done: int, total: int, label: str = "") -> None:
+        if self.stopping:
+            return  # a late tick must not overwrite "stopping…" with a countdown
         if total and self.bar.maximum() != total:
             self.bar.setRange(0, total)
         self.bar.setValue(done)
@@ -171,6 +206,22 @@ def _demo() -> None:
     assert dialog.isHidden(), "closing must hide"
     dialog.show()
     assert dialog.isVisible(), "and it must come back"
+
+    # Hide and Cancel are the two buttons that sound alike. Hiding asks for
+    # nothing; cancelling asks once, and cannot be asked twice.
+    stops = []
+    dialog.cancelled.connect(lambda: stops.append(True))
+    dialog.hide()
+    assert not stops, "hiding must not stop the job"
+
+    dialog.cancel.click()
+    assert stops == [True] and dialog.stopping
+    assert not dialog.cancel.isEnabled(), "cancel must not be clickable twice"
+    assert "stopping" in dialog.detail.text()
+
+    # Ticks already in flight when Cancel was pressed must not paint over it.
+    dialog.track(4, 60, "trial 4/60")
+    assert "stopping" in dialog.detail.text(), dialog.detail.text()
 
     assert _clock(9) == "9s" and _clock(75) == "1m 15s" and _clock(3700) == "1h 01m"
 
