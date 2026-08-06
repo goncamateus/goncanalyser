@@ -32,6 +32,7 @@ be imported before Qt builds its first widget, or every `savefig` below fails wi
 """
 
 import json
+import random
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -53,6 +54,12 @@ RADIAL = 64  # buckets in the resampled radial frequency profile
 LBP_BINS = 10  # uniform LBP with P=8 tops out at P + 1 codes
 TOP_CLASSES = 12  # per-class panels stay readable up to about a dozen rows
 
+# Annotations whose mask is decoded for the true-area and complexity panels.
+# Everything else in pass A reads the bbox, which is free; these two need the
+# shape itself. Deterministically sampled rather than taken from the front, so a
+# file ordered by image does not report only its first few hundred frames.
+SHAPE_CAP = 2000
+
 # ponytail: LBP and the edge maps run at their default settings. Tuning them is
 # what the app's own tabs are for; this is a survey, not a second control panel.
 DEFAULTS = Settings()
@@ -62,12 +69,22 @@ DEFAULTS = Settings()
 
 
 def geometry(coco) -> dict:
-    """Shape and co-occurrence statistics over every annotation in the file."""
+    """Shape and co-occurrence statistics over every annotation in the file.
+
+    Area and complexity come from the **decoded mask**, not from the `area`
+    field. That field is supposed to hold the segmentation area, and exports
+    disagree — Roboflow writes the bounding box area instead, which turns an
+    "object area" histogram into a bbox histogram that reads about twice as
+    large. The mask is the thing being asked about, so it is the thing measured;
+    whether the file agrees is reported in the summary rather than trusted.
+    """
     per_class: dict[str, dict[str, list]] = defaultdict(
         lambda: {"area": [], "aspect": [], "scale": [], "complexity": []}
     )
     present: list[set[str]] = []
     overlap: dict[tuple[str, str], list[float]] = defaultdict(list)
+    shaped = _shape_sample(coco)
+    bbox_area_field = 0
 
     for image_id, anns in coco.anns.items():
         img = coco.images[image_id]
@@ -79,16 +96,20 @@ def geometry(coco) -> dict:
             here.add(name)
             box = ann.get("bbox") or [0, 0, 0, 0]
             w, h = float(box[2]), float(box[3])
-            area = float(ann.get("area") or w * h)
+            if abs(float(ann.get("area") or 0) - w * h) < 1.0:
+                bbox_area_field += 1
 
             stats = per_class[name]
-            stats["area"].append(area / frame_area)
             if h > 0:
                 stats["aspect"].append(w / h)
-            stats["scale"].append(area**0.5)
-            shape = _complexity(ann, area)
-            if shape is not None:
-                stats["complexity"].append(shape)
+            stats["scale"].append((w * h) ** 0.5)
+            if id(ann) in shaped:
+                mask = coco.instance(ann, int(img["height"]), int(img["width"]))
+                if mask is not None and mask.any():
+                    stats["area"].append(np.count_nonzero(mask) / frame_area)
+                    shape = _complexity(mask)
+                    if shape is not None:
+                        stats["complexity"].append(shape)
 
         present.append(here)
         # Spatial overlap between classes, not within one: two people overlapping
@@ -101,17 +122,31 @@ def geometry(coco) -> dict:
 
     counts = Counter(n for image in present for n in image)
     top = [n for n, _ in counts.most_common(TOP_CLASSES)]
+    total = sum(len(a) for a in coco.anns.values()) or 1
 
     return {
         "per_class": {n: {k: np.asarray(v, float) for k, v in per_class[n].items()} for n in top},
         "top": top,
         "counts": dict(counts),
+        "shaped": len(shaped),
+        # True when the file's `area` is the bounding box's, not the mask's. Not
+        # used to compute anything — it explains why these numbers are smaller
+        # than the ones the annotation file appears to state.
+        "bbox_area_field": bbox_area_field > total * 0.9,
         "cooccurrence": _cooccurrence(present, top),
         "overlap": np.array(
             [[float(np.mean(overlap[tuple(sorted((a, b)))] or [0.0])) for b in top] for a in top]
         ),
         "centres": _centres(coco),
     }
+
+
+def _shape_sample(coco) -> set[int]:
+    """ids() of the annotations whose mask is worth decoding, capped at SHAPE_CAP."""
+    every = [ann for anns in coco.anns.values() for ann in anns]
+    if len(every) > SHAPE_CAP:
+        every = random.Random(0).sample(every, SHAPE_CAP)
+    return {id(ann) for ann in every}
 
 
 def _pairs(items):
@@ -132,20 +167,18 @@ def _box_iou(a, b) -> float:
     return inter / (aw * ah + bw * bh - inter or 1.0)
 
 
-def _complexity(ann: dict, area: float) -> float | None:
+def _complexity(mask: np.ndarray) -> float | None:
     """Isoperimetric quotient P^2 / (4*pi*A). 1.0 is a circle; ragged shapes climb.
 
-    Polygons only — a crowd RLE has no vertex list to take a perimeter from, and
-    tracing its boundary would measure the resolution as much as the shape.
+    Taken from the decoded mask rather than from polygon vertices, so it works
+    whichever way the file stores its segmentation — and RLE, which has no vertex
+    list at all, is what most exports use.
     """
-    seg = ann.get("segmentation")
-    if not isinstance(seg, list) or not seg or area <= 0:
+    area = np.count_nonzero(mask)
+    if area <= 0:
         return None
-    perimeter = 0.0
-    for ring in seg:
-        if len(ring) >= 6:
-            pts = np.asarray(ring, np.float32).reshape(-1, 2)
-            perimeter += float(cv2.arcLength(pts, True))
+    found, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    perimeter = sum(float(cv2.arcLength(c, True)) for c in found)
     return perimeter**2 / (4 * np.pi * area) if perimeter else None
 
 
@@ -383,7 +416,7 @@ def _fig_geometry(pixels: Pixels, shapes: dict):
         if values.size:
             area_ax.hist(values, bins=np.logspace(-5, 0, 40), histtype="step", label=name)
     area_ax.set_xscale("log")
-    area_ax.set_title("Object area / image area")
+    area_ax.set_title(f"Mask area / image area ({shapes['shaped']} masks decoded)")
     area_ax.legend(fontsize=6, ncol=2)
 
     aspects = [np.clip(per_class[n]["aspect"], 0, 6) for n in top]
@@ -398,6 +431,7 @@ def _fig_geometry(pixels: Pixels, shapes: dict):
         color="tab:orange",
     )
     scale_ax.set_xticks(range(len(top)), top, rotation=70, fontsize=7)
+    scale_ax.set_xlim(-1, len(top))  # one class must not render as a full-width block
     scale_ax.set_title("Scale variance — sd of sqrt(area), px")
 
     complexity = np.concatenate(
@@ -412,9 +446,24 @@ def _fig_geometry(pixels: Pixels, shapes: dict):
 
 
 def _fig_classes(pixels: Pixels, shapes: dict):
+    top = shapes["top"]
+    if len(top) < 2:
+        # A 1x1 co-occurrence matrix is a single coloured square, which looks
+        # like a broken chart rather than what it is: a dataset with one class,
+        # where "which classes appear together" has no answer.
+        figure = Figure(figsize=(9, 3))
+        figure.subplots().axis("off")
+        only = top[0] if top else "nothing"
+        figure.text(
+            0.5, 0.5,
+            f"Class relations need two or more classes.\n"
+            f"This dataset annotates {only!r} only — nothing co-occurs with it.",
+            ha="center", va="center", fontsize=12,
+        )
+        return figure
+
     figure, axes = _panels(1, 2, 14, 6)
     figure.suptitle("Class relations")
-    top = shapes["top"]
     for ax, data, title, cmap in (
         (axes[0], np.log1p(shapes["cooccurrence"]), "Co-occurrence, log images", "Blues"),
         (axes[1], shapes["overlap"], "Mean bbox IoU between classes", "Reds"),
@@ -457,11 +506,25 @@ def analyse(ann_path: str, images_dir: str, out_dir: str, n: int = 200, category
         "annotations": sum(len(a) for a in coco.anns.values()),
         "images_in_file": len(coco.images),
         "images_sampled": total,
+        "masks_decoded": shapes["shaped"],
         "classes": len(coco.names),
         "category": category or "all",
-        "crowd_skipped": coco.skipped,
+        "undecodable": coco.skipped,
+        "area_field_is_bbox": shapes["bbox_area_field"],
         **pixels.summary(),
     }
+
+    # Refuse rather than publish an empty report. Every chart below would render
+    # as a clean, blank, entirely convincing figure — which is a worse outcome
+    # than not producing one, because nothing about it looks wrong.
+    if not pixels.images:
+        raise ValueError(
+            f"measured 0 of {total} sampled images — nothing to report. "
+            f"{coco.skipped} annotations could not be decoded. "
+            "Check that the images folder holds the file names the annotations "
+            "refer to, and that the class filter matches something."
+        )
+
     written = _draw(pixels, shapes, out)
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
@@ -493,7 +556,8 @@ def _demo() -> None:
 
         summary = result["summary"]
         assert summary["images_sampled"] == 4 and summary["images_measured"] == 4, summary
-        assert summary["annotations"] == 4 and summary["crowd_skipped"] == 0
+        assert summary["annotations"] == 4 and summary["undecodable"] == 0
+        assert summary["masks_decoded"] == 4, summary
 
         # The fixture is white squares on dark noise, so every contrast metric has
         # a known direction. A mask/background mix-up flips all four at once.
