@@ -1,9 +1,11 @@
-"""Entry point: ask for something to look at, then open the window on it.
+"""Entry point: open the window, with something on screen only if one was named.
 
-The file dialog *is* the startup screen — there is no empty-window state to
-design around and no CLI to keep in sync. A path can still be passed as an
-argument to skip the dialog, which is what you want when you are re-running the
-same clip twenty times in a row. A folder argument works too.
+No blocking file dialog before the window can even exist: the viewer's own
+placeholder text — "Open video, image, or dataset to begin" — is the startup
+screen, and File > Open (Ctrl+O / Ctrl+Shift+O) is what answers it. A path can
+still be passed as an argument to skip straight to it, which is what you want
+when you are re-running the same clip twenty times in a row. A folder argument
+works too.
 """
 
 import sys
@@ -34,25 +36,22 @@ except ImportError:
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from core.source import FrameSource, SourceError  # noqa: E402
-from ui.dialogs import open_source  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
 
 def main() -> int:
-    # QApplication must exist before any widget, including the file dialog.
+    # QApplication must exist before any widget, including MainWindow itself.
     app = QApplication(sys.argv)
     # Names the per-platform config directory the settings cache lives in.
     app.setApplicationName("analyser")
 
-    path = sys.argv[1] if len(sys.argv) > 1 else open_source(None)
-    if not path:
-        return 0  # cancelled: quit quietly, an empty window would be useless
-
-    try:
-        source = FrameSource(path)
-    except SourceError as exc:
-        QMessageBox.critical(None, "Cannot open", str(exc))
-        return 1
+    source = None
+    if len(sys.argv) > 1:
+        try:
+            source = FrameSource(sys.argv[1])
+        except SourceError as exc:
+            QMessageBox.critical(None, "Cannot open", str(exc))
+            return 1
 
     window = MainWindow(source)
     window.resize(1400, 820)

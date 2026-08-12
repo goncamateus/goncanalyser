@@ -70,9 +70,14 @@ TABS = (
 
 
 class MainWindow(QMainWindow):
-    """One window, one source, one worker thread."""
+    """One window, at most one source, at most one worker thread.
 
-    def __init__(self, source: FrameSource):
+    `source` is optional: the window opens empty rather than blocking on a
+    file dialog before it can exist at all, and the viewer's own placeholder
+    text is the instruction for what to do next.
+    """
+
+    def __init__(self, source: FrameSource | None = None):
         super().__init__()
         self.source = source
         self.worker: Worker | None = None  # set at the end of __init__
@@ -107,7 +112,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._panel())
         self.setCentralWidget(central)
         self._menus()
-        self.setWindowTitle(f"Analyser — {source.path}")
+        self.setWindowTitle(f"Analyser — {source.path}" if source else "Analyser")
         # The dataset jobs get their own corner of the status bar. They cannot
         # share `showMessage` with the frame worker, which writes a line there on
         # every frame — a hundred a second even while paused — and would wipe
@@ -138,7 +143,7 @@ class MainWindow(QMainWindow):
         ):
             QShortcut(QKeySequence(keys), self, slot)
 
-        self.worker = self._start_worker()
+        self.worker = self._start_worker() if self.source is not None else None
         self.push_previews()
 
     # --- layout -------------------------------------------------------------
@@ -180,6 +185,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.view)
         self.back = self._button("◀", lambda: self.step(-1))
         self.forward = self._button("▶", lambda: self.step(+1))
+        # Nothing to play, step through or seek in before a source is even
+        # open — `on_opened` is the one that turns these back on, and it only
+        # ever fires once a worker exists to open something.
+        for widget in (self.play_button, self.back, self.forward):
+            widget.setEnabled(False)
         row.addWidget(self.back)
         row.addWidget(self.play_button)
         row.addWidget(self.forward)
@@ -257,10 +267,13 @@ class MainWindow(QMainWindow):
 
         From the source rather than from a painted frame: the Histogram view
         paints a 512x256 plot, which would cap the boxes at the size of a chart.
+        No source yet — nothing to size the viewer or the boxes to, but Draw
+        still needs `refresh_draw` to disable itself.
         """
-        width, height = self.source.size
-        self.video.source_size = QSize(width, height)
-        self.adjust.set_frame_size(width, height)
+        if self.source is not None:
+            width, height = self.source.size
+            self.video.source_size = QSize(width, height)
+            self.adjust.set_frame_size(width, height)
         self.refresh_draw()
 
     def arm_draw(self) -> None:
@@ -270,7 +283,8 @@ class MainWindow(QMainWindow):
     def refresh_draw(self) -> None:
         """Drawing is meaningless over the Histogram — that is a plot, not the frame."""
         on_frame = self.view.currentText() != "Histogram"
-        self.adjust.draw.setEnabled(on_frame and not self.source.size == (0, 0))
+        has_frame = self.source is not None and self.source.size != (0, 0)
+        self.adjust.draw.setEnabled(on_frame and has_frame)
         self.adjust.draw.setToolTip(
             "" if on_frame else "switch off the Histogram view to draw on the frame"
         )
@@ -413,7 +427,8 @@ class MainWindow(QMainWindow):
 
         if self.worker:
             self.worker.stop()
-        self.source.release()
+        if self.source is not None:
+            self.source.release()
         self.source = source
         self.setWindowTitle(f"Analyser — {path}")
         self.on_source_changed()
@@ -421,6 +436,9 @@ class MainWindow(QMainWindow):
         self.push_previews()
 
     def export(self) -> None:
+        if self.source is None:
+            self.statusBar().showMessage("open something first")
+            return
         if self.exporter is not None:
             self.statusBar().showMessage("an export is already running")
             return
@@ -656,7 +674,8 @@ class MainWindow(QMainWindow):
             # one that has hung — the more so now the job's own window can be hidden.
             self.dataset.requestInterruption()
             self.dataset.wait()
-        self.source.release()
+        if self.source is not None:
+            self.source.release()
         save_cached(self.settings)
         super().closeEvent(event)
 

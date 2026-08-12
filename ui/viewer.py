@@ -25,7 +25,7 @@ class Viewer(QLabel):
     selected = pyqtSignal(int, int, int, int)  # x, y, w, h in *image* pixels
 
     def __init__(self):
-        super().__init__("waiting for the first frame…")
+        super().__init__("Open video, image, or dataset to begin\nCtrl+O / Ctrl+Shift+O")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(640, 360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
