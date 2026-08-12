@@ -236,12 +236,19 @@ class MainWindow(QMainWindow):
         for text, keys, slot in (
             ("Analyse…", "Ctrl+D", self.analyse_dataset),
             ("Optimise…", "Ctrl+Shift+D", self.optimise_dataset),
-            ("Extract from ROS bag…", "Ctrl+Shift+E", self.extract_rosbag),
         ):
             action = QAction(text, self)
             action.setShortcut(QKeySequence(keys))
             action.triggered.connect(slot)
             dataset.addAction(action)
+
+        # Its own menu, not a third Dataset verb: a bag isn't a COCO dataset,
+        # it's an input a COCO dataset gets built from.
+        rosbag = bar.addMenu("Rosbag")
+        extract_action = QAction("Extract from ROS bag…", self)
+        extract_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        extract_action.triggered.connect(self.extract_rosbag)
+        rosbag.addAction(extract_action)
 
     # --- region of interest -------------------------------------------------
 
