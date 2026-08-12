@@ -17,6 +17,7 @@ from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -183,6 +184,18 @@ class ExportDialog(QDialog):
         return dialog.choices()
 
 
+def _path_row(placeholder: str, slot) -> tuple[QLineEdit, QHBoxLayout]:
+    """A path box with a Browse button, the way ExportDialog does its one."""
+    line = QLineEdit()
+    line.setPlaceholderText(placeholder)
+    browse = QPushButton("Browse…")
+    browse.clicked.connect(slot)
+    row = QHBoxLayout()
+    row.addWidget(line, 1)
+    row.addWidget(browse)
+    return line, row
+
+
 class _DatasetInputs(QDialog):
     """Where the ground truth is. Shared by both dataset jobs, run by neither.
 
@@ -198,9 +211,9 @@ class _DatasetInputs(QDialog):
         self.setWindowTitle(title)
         self.setMinimumWidth(560)
 
-        self.annotations, ann_row = self._pick("instances_val2017.json…", self._browse_json)
-        self.images, images_row = self._pick("the folder those images live in…", self._browse_images)
-        self.folder, out_row = self._pick("where to write the results…", self._browse_out)
+        self.annotations, ann_row = _path_row("instances_val2017.json…", self._browse_json)
+        self.images, images_row = _path_row("the folder those images live in…", self._browse_images)
+        self.folder, out_row = _path_row("where to write the results…", self._browse_out)
 
         self.count = QSpinBox()
         self.count.setRange(1, 100_000)
@@ -242,17 +255,6 @@ class _DatasetInputs(QDialog):
         self.page.addWidget(self.note)
         self.page.addWidget(self.buttons)
         self._refresh()
-
-    def _pick(self, placeholder: str, slot) -> tuple[QLineEdit, QHBoxLayout]:
-        """A path box with a Browse button, the way ExportDialog does its one."""
-        line = QLineEdit()
-        line.setPlaceholderText(placeholder)
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(slot)
-        row = QHBoxLayout()
-        row.addWidget(line, 1)
-        row.addWidget(browse)
-        return line, row
 
     def _browse_json(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -435,6 +437,141 @@ class OptimiseDialog(_DatasetInputs):
         if chosen is not None:
             self.parent().apply_settings(chosen["settings"])
             self.reject()
+
+
+class RosbagDialog(QDialog):
+    """Which topic to pull frames from, and where they land as PNG/JPG.
+
+    Not a `_DatasetInputs` subclass — a bag has a topic to choose, not a COCO
+    annotations file, a class name, or a sample count, so the field set does
+    not match closely enough for inheritance to earn its keep.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Extract from ROS bag")
+        self.setMinimumWidth(560)
+        self._wanted_topic = ""
+
+        self.bag, bag_row = _path_row("a .db3 file…", self._browse_bag)
+        self.folder, out_row = _path_row("where to write the frames…", self._browse_out)
+
+        self.topic = QComboBox()
+        self.topic.setEnabled(False)
+
+        self.format = QComboBox()
+        self.format.addItems(["png", "jpg"])
+
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+
+        form = QFormLayout()
+        form.addRow("Bag", bag_row)
+        form.addRow("Topic", self.topic)
+        form.addRow("Output folder", out_row)
+        form.addRow("Format", self.format)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+        column = QVBoxLayout(self)
+        column.addWidget(QLabel("<b>ROS2 bag (.db3)</b>"))
+        column.addLayout(form)
+        column.addWidget(self.status)
+        column.addWidget(QLabel(
+            "<i>Every message on the chosen topic is written as one frame — "
+            "sensor_msgs/Image and CompressedImage both work. A bare .db3 with "
+            "no metadata.yaml alongside it reads fine; the topic list comes "
+            "from the file itself.</i>"
+        ))
+        column.addWidget(self.buttons)
+
+        self.bag.textChanged.connect(self._peek)
+        self.folder.textChanged.connect(self._refresh)
+        self.topic.currentTextChanged.connect(self._on_topic_changed)
+        self._refresh()
+
+    def _browse_bag(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "ROS2 bag", "", "ROS2 bag (*.db3);;All files (*)"
+        )
+        if path:
+            self.bag.setText(path)
+
+    def _browse_out(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Write the frames to…")
+        if chosen:
+            self.folder.setText(chosen)
+
+    def _peek(self) -> None:
+        """The bag's topic list — fast, no messages are decoded here."""
+        self.topic.clear()
+        self.topic.setEnabled(False)
+        self.status.setText("")
+        path = self.bag.text()
+        if not path:
+            self._refresh()
+            return
+        from dataset.rosbag import image_topics
+
+        try:
+            topics = image_topics(path)
+        # Whatever a file that isn't really a rosbag2 sqlite database throws —
+        # this is a best-effort status line, not a reason to crash the dialog.
+        except Exception as exc:
+            self.status.setText(f"cannot read this bag: {exc}")
+            self._refresh()
+            return
+        if not topics:
+            self.status.setText("no image topics in this bag")
+            self._refresh()
+            return
+        self.topic.addItems(topics)  # a fresh combo defaults to the first entry
+        self.topic.setEnabled(True)
+        if self._wanted_topic in topics:
+            self.topic.setCurrentText(self._wanted_topic)
+        elif len(topics) > 1:
+            self.status.setText(f"{len(topics)} image topics found")
+        self._refresh()
+
+    def _on_topic_changed(self, text: str) -> None:
+        if text:  # not the empty string `_peek` clears the combo down to
+            self._wanted_topic = text
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.ok.setEnabled(
+            bool(self.bag.text() and self.folder.text() and self.topic.currentText())
+        )
+
+    def options(self) -> dict:
+        return {
+            "bag_path": self.bag.text(),
+            "topic": self.topic.currentText(),
+            "out_dir": self.folder.text(),
+            "fmt": self.format.currentText(),
+        }
+
+    def restore(self, data: dict) -> None:
+        self._wanted_topic = data.get("topic", "")
+        self.bag.setText(data.get("bag_path", ""))  # re-peeks, reselects the topic above
+        self.folder.setText(data.get("out_dir", ""))
+        if data.get("fmt") in ("png", "jpg"):
+            self.format.setCurrentText(data["fmt"])
+
+    @classmethod
+    def ask(cls, parent) -> dict | None:
+        dialog = cls(parent)
+        dialog.restore(_load_dialog_options(cls.__name__))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        options = dialog.options()
+        _save_dialog_options(cls.__name__, options)
+        return options
 
 
 class DashboardDialog(QDialog):

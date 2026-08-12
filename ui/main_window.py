@@ -19,8 +19,8 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtCore import QSize, Qt, QUrl
+from PyQt6.QtGui import QAction, QDesktopServices, QImage, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -48,6 +48,7 @@ from .dialogs import (
     OptimiseDialog,
     ParetoDialog,
     PreferencesDialog,
+    RosbagDialog,
     open_folder,
     open_settings,
     open_source,
@@ -235,6 +236,7 @@ class MainWindow(QMainWindow):
         for text, keys, slot in (
             ("Analyse…", "Ctrl+D", self.analyse_dataset),
             ("Optimise…", "Ctrl+Shift+D", self.optimise_dataset),
+            ("Extract from ROS bag…", "Ctrl+Shift+E", self.extract_rosbag),
         ):
             action = QAction(text, self)
             action.setShortcut(QKeySequence(keys))
@@ -449,7 +451,7 @@ class MainWindow(QMainWindow):
         try:
             from dataset.stats import analyse
         except ImportError as exc:
-            self._no_dataset_tools(exc)
+            self._no_dataset_tools(exc, "dataset")
             return
         self._run_dataset(analyse, AnalyseDialog, "analysing", self.on_analysed)
 
@@ -458,7 +460,7 @@ class MainWindow(QMainWindow):
         try:
             from dataset.optimise import search
         except ImportError as exc:
-            self._no_dataset_tools(exc)
+            self._no_dataset_tools(exc, "dataset")
             return
         self._run_dataset(search, OptimiseDialog, "optimising", self.on_optimised,
                           # Trial zero is whatever is on screen, so the search starts
@@ -466,18 +468,28 @@ class MainWindow(QMainWindow):
                           # always comparable against it.
                           seed=asdict(self.settings))
 
-    def _no_dataset_tools(self, exc: ImportError) -> None:
+    def extract_rosbag(self) -> None:
+        """Dump every frame on a ROS bag's image topic to PNG/JPG."""
+        try:
+            from dataset.rosbag import extract
+        except ImportError as exc:
+            self._no_dataset_tools(exc, "rosbag")
+            return
+        self._run_dataset(extract, RosbagDialog, "extracting", self.on_extracted)
+
+    def _no_dataset_tools(self, exc: ImportError, group: str) -> None:
         """Name the one package that is missing, not the whole group.
 
-        Surveying needs matplotlib and tuning needs optuna, and neither needs the
-        other's. Reporting both would send someone installing a dependency the
-        thing they asked for does not use.
+        Surveying needs matplotlib, tuning needs optuna, and extracting needs
+        rosbags — none of the three needs another's. Reporting all of them
+        would send someone installing a dependency the thing they asked for
+        does not use, and `--group dataset` would not even install `rosbags`.
         """
         QMessageBox.information(
             self,
             "Dataset tools not installed",
             f"This needs {exc.name}, which ships separately from the app.\n\n"
-            "Install it with:\n\n    uv sync --group dataset",
+            f"Install it with:\n\n    uv sync --group {group}",
         )
 
     def _run_dataset(self, job, dialog, verb: str, done, **extra) -> None:
@@ -562,6 +574,20 @@ class MainWindow(QMainWindow):
         if chosen is not None:
             self.apply_settings(chosen["settings"])
             self._say(f"optimised settings applied — f(θ) = {chosen['score']}")
+
+    def on_extracted(self, result: dict) -> None:
+        """A confirmation, not a choice — one topic in, one folder of frames out."""
+        self._end_dataset()
+        frames = result.get("frames", 0)
+        self._say(f"extracted {frames} frames to {result.get('dir')}")
+        box = QMessageBox(self)
+        box.setWindowTitle("Extraction finished")
+        box.setText(f"Wrote {frames} frame(s) from {result.get('topic')} to\n{result.get('dir')}")
+        box.addButton(QMessageBox.StandardButton.Ok)
+        open_folder_btn = box.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
+        box.exec()
+        if box.clickedButton() is open_folder_btn:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(result.get("dir", "")))
 
     def on_dataset_failed(self, message: str) -> None:
         self._end_dataset()
