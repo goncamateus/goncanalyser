@@ -1,14 +1,23 @@
 """Search the settings that best reproduce a dataset's ground-truth masks.
 
-The objective is the one asked for:
+Three terms describe what "best" means, searched together rather than folded
+into one number:
 
-    f(θ) = α·IoU(Mθ, Mgt) + β·|Mθ ∩ Mgt| / |Mgt| − γ·|Mθ \\ Mgt| / |I \\ Mgt|
+    IoU(Mθ, Mgt)                     — overlap with the truth
+    recall = |Mθ ∩ Mgt| / |Mgt|       — coverage of the truth
+    spill  = |Mθ \\ Mgt| / |I \\ Mgt|   — share of the background caught
 
-IoU alone would be enough for a benchmark. The other two terms are what make it a
-*tuning* objective: β pays for coverage, so a timid threshold that finds a clean
-sliver of every object cannot win; γ charges for spilled background, normalised by
-how much background there is, so the price of over-segmenting does not depend on
-how big the objects happen to be in this dataset.
+IoU alone would be enough for a benchmark. Recall is what stops a timid
+threshold that finds a clean sliver of every object from winning; spill is what
+stops "predict everything" from winning back, normalised by how much background
+there is so the price of over-segmenting does not depend on how big the objects
+happen to be in this dataset. TPE searches all three as a Pareto front —
+tightening the mask trades IoU against recall, so nothing "wins" outright — and
+
+    f(θ) = α·IoU + β·recall − γ·spill
+
+is kept only to rank the front afterwards into one recommended trade-off, the
+same weights the panel always exposed.
 
 **What is actually searched, and why it is twelve parameters and not thirty-five.**
 
@@ -28,7 +37,10 @@ produces a mask at all, and `roi_on`, because a ground-truth mask covers the who
 frame and scoring a crop against one measures the crop.
 """
 
+import csv
 import json
+import os
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -113,23 +125,30 @@ def decompose(samples: list, s: Settings) -> dict:
     everything. These are the numbers that do separate them, and `coverage`
     against `truth` is the one to read first: ten times larger is ten times
     larger no matter what the weighted total says.
+
+    This is now the search's objective function, not only its post-hoc report,
+    so a parameter combination OpenCV refuses has to score rather than crash a
+    trial — the worst point on every term, the same call `evaluate` makes.
     """
-    iou, recall, spill, coverage, truth = [], [], [], [], []
-    for _, bgr, gt in samples:
-        p, t = predict(bgr, s) > 0, gt > 0
-        hit = np.count_nonzero(p & t)
-        iou.append(hit / (np.count_nonzero(p | t) or 1))
-        recall.append(hit / (np.count_nonzero(t) or 1))
-        spill.append(np.count_nonzero(p & ~t) / (np.count_nonzero(~t) or 1))
-        coverage.append(np.count_nonzero(p) / p.size)
-        truth.append(np.count_nonzero(t) / t.size)
-    return {
-        "iou": round(float(np.mean(iou)), 4),
-        "recall": round(float(np.mean(recall)), 4),
-        "spill": round(float(np.mean(spill)), 4),
-        "coverage": round(float(np.mean(coverage)), 4),
-        "truth": round(float(np.mean(truth)), 4),
-    }
+    try:
+        iou, recall, spill, coverage, truth = [], [], [], [], []
+        for _, bgr, gt in samples:
+            p, t = predict(bgr, s) > 0, gt > 0
+            hit = np.count_nonzero(p & t)
+            iou.append(hit / (np.count_nonzero(p | t) or 1))
+            recall.append(hit / (np.count_nonzero(t) or 1))
+            spill.append(np.count_nonzero(p & ~t) / (np.count_nonzero(~t) or 1))
+            coverage.append(np.count_nonzero(p) / p.size)
+            truth.append(np.count_nonzero(t) / t.size)
+        return {
+            "iou": round(float(np.mean(iou)), 4),
+            "recall": round(float(np.mean(recall)), 4),
+            "spill": round(float(np.mean(spill)), 4),
+            "coverage": round(float(np.mean(coverage)), 4),
+            "truth": round(float(np.mean(truth)), 4),
+        }
+    except cv2.error:
+        return {"iou": 0.0, "recall": 0.0, "spill": 1.0, "coverage": 0.0, "truth": 0.0}
 
 
 def settings_of(params: dict, base: Settings | None = None) -> Settings:
@@ -181,6 +200,42 @@ def seed_params(values: dict) -> dict:
     return out
 
 
+_POOL_SAMPLES: list = []  # set once per worker process by `_init_pool`
+
+
+def _init_pool(samples: list) -> None:
+    """Runs once per worker process, so the sample crosses the pickle once — not
+    once a trial, which for a hundred-plus trials would cost more than it saves.
+    """
+    global _POOL_SAMPLES
+    _POOL_SAMPLES = samples
+
+
+def _score_trial(params: dict) -> dict:
+    """Runs in a worker process: one trial's objective terms."""
+    return decompose(_POOL_SAMPLES, settings_of(params))
+
+
+def _write_front_csv(path: Path, front: list[dict]) -> None:
+    """The front, human-skimmable: rank, score, terms, then the searched knobs.
+
+    Capped at ten rows on purpose — this is a report to skim in a spreadsheet, not
+    a second copy of the data; `front.json` next to it carries the whole thing.
+    """
+    fields = ["rank", "score", "iou", "recall", "spill", "coverage", "truth", "oversegmented", *SPACE]
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        for rank, entry in enumerate(front[:10], start=1):
+            writer.writerow({
+                "rank": rank,
+                "score": entry["score"],
+                "oversegmented": entry["oversegmented"],
+                **entry["parts"],  # iou, recall, spill, coverage, truth
+                **{field: entry["settings"][field] for field in SPACE},
+            })
+
+
 def search(
     ann_path: str,
     images_dir: str,
@@ -190,13 +245,19 @@ def search(
     category: str = "",
     weights: tuple = WEIGHTS,
     seed: dict | None = None,
+    workers: int | None = None,
 ):
-    """Generator yielding (done, total); returns the best settings when exhausted.
+    """Generator yielding (done, total, label); returns the Pareto front when exhausted.
 
     The sample is decoded **once** and held for the whole study. Re-reading it per
     trial would cost more than the chain does, and re-*drawing* it would make the
     objective stochastic — two trials could then differ only in which images they
     happened to be scored on, which is not a comparison.
+
+    Trials run on a process pool: nothing about trial *k* depends on trial
+    *k-1*'s result, only on which point in the space TPE asks for next, so they
+    parallelise cleanly. One core is left free for the GUI thread that is
+    polling this generator.
     """
     # Optuna logs a paragraph per trial at INFO. A hundred trials of it buries
     # whatever the app itself has to say.
@@ -211,8 +272,15 @@ def search(
     if not samples:
         raise ValueError("no readable annotated images in that dataset")
 
+    # TPESampler handles `directions=[...]` natively — same Bayesian sampler as
+    # the single-objective search, still cheap on the handful-of-trials budgets
+    # this dialog allows. NSGA-II was the other candidate, but it only starts
+    # evolving once a full generation (population_size, default 50) has run,
+    # which a short study never reaches — it would sample almost blindly the
+    # whole way through instead of converging.
     study = optuna.create_study(
-        direction="maximize", sampler=optuna.samplers.TPESampler(seed=0)
+        directions=["maximize", "maximize", "minimize"],  # iou, recall, spill
+        sampler=optuna.samplers.TPESampler(seed=0),
     )
     baseline = settings_of(seed_params(seed), Settings()) if seed else Settings()
     if seed:
@@ -220,41 +288,95 @@ def search(
         # human judgement and the result is always comparable against it.
         study.enqueue_trial(seed_params(seed))
 
-    # ponytail: trials run one at a time. Optuna's ask/tell is what lets this be a
-    # generator at all, and a progress bar the user can watch is worth more than
-    # the cores; a process pool is the upgrade if a study starts taking too long.
-    for done in range(1, int(trials) + 1):
-        trial = study.ask()
-        study.tell(trial, evaluate(samples, settings_of(_suggest(trial)), weights))
-        # The best score so far, not just the count. A search is minutes long and
-        # the count alone cannot answer the only question worth asking while it
-        # runs, which is whether it is still finding anything.
-        yield done, int(trials), f"trial {done}/{trials} · best f = {study.best_value:.4f}"
+    trials = int(trials)
+    workers = workers or max(1, (os.cpu_count() or 2) - 1)
+    workers = max(1, min(workers, trials))
 
-    # Through the same snap the trials went through, or the winner comes back off
-    # the grid — `best_params` returns what Optuna stored, not what was evaluated.
-    best = settings_of(seed_params(study.best_params))
+    done, best_iou = 0, -1.0
+    with ProcessPoolExecutor(workers, initializer=_init_pool, initargs=(samples,)) as pool:
+        pending: dict = {}
+        while done < trials:
+            while len(pending) < workers and done + len(pending) < trials:
+                trial = study.ask()
+                pending[pool.submit(_score_trial, _suggest(trial))] = trial
+            settled, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in settled:
+                trial = pending.pop(future)
+                parts = future.result()
+                study.tell(trial, [parts["iou"], parts["recall"], parts["spill"]])
+                done += 1
+                best_iou = max(best_iou, parts["iou"])
+                # The best IoU so far, not just the count. A search is minutes
+                # long and the count alone cannot answer the only question worth
+                # asking while it runs, which is whether it is still finding
+                # anything — and unlike f(θ), a trade-off can never make IoU
+                # itself go down, only trade it against recall or spill.
+                yield (
+                    done,
+                    trials,
+                    f"trial {done}/{trials} · pareto front {len(study.best_trials)} "
+                    f"· best IoU {best_iou:.4f}",
+                )
+
     before = evaluate(samples, replace(baseline, **PINNED), weights)
-    values = asdict(best)
+    alpha, beta, gamma = weights
+
+    # Through the same snap the trials went through, or a trade-off comes back
+    # off the grid — `trial.params` returns what Optuna stored, not what was
+    # evaluated.
+    front = []
+    for trial in study.best_trials:
+        settings = settings_of(seed_params(trial.params))
+        values = asdict(settings)
+        parts = decompose(samples, settings)
+        front.append({
+            "settings": values,
+            "parts": parts,
+            # `evaluate`, not the front-member's own (rounded) parts, so this
+            # number is exactly what applying these settings would score.
+            "score": round(evaluate(samples, settings, weights), 4),
+            # The trade-off covering far more frame than the ground truth means
+            # the spill weight is too small to bite on objects this size, not
+            # that the search failed. Said here because IoU alone cannot show it.
+            "oversegmented": parts["coverage"] > 3 * parts["truth"],
+            "changed": {k: v for k, v in values.items() if v != getattr(baseline, k)},
+        })
+    front.sort(key=lambda row: row["score"], reverse=True)
+    best = front[0]
+
     (out / "best_settings.json").write_text(
-        json.dumps({"source": ann_path, "frames": len(samples), "settings": values}, indent=2) + "\n"
+        json.dumps(
+            {"source": ann_path, "frames": len(samples), "settings": best["settings"]}, indent=2
+        )
+        + "\n"
     )
-    parts = decompose(samples, best)
-    return {
+    _write_front_csv(out / "front.csv", front)
+
+    # Everything `ParetoDialog` needs to show this front again, without a search:
+    # `front` is the whole thing, not just the ten `front.csv` skims for a human,
+    # because "Choose result…" is choosing among what the dialog showed live, and
+    # a trade-off dropped here could not be brought back.
+    report = {
         "dir": str(out),
-        "best": values,
-        "score": round(study.best_value, 4),
-        "baseline": round(before, 4),
         "images": len(samples),
-        "trials": int(trials),
+        "trials": trials,
         "weights": list(weights),
-        "parts": parts,
-        # The winner covering far more frame than the ground truth means the
-        # spill weight is too small to bite on objects this size, not that the
-        # search failed. Said here because a single score cannot show it.
-        "oversegmented": parts["coverage"] > 3 * parts["truth"],
-        "changed": {k: v for k, v in values.items() if v != getattr(baseline, k)},
-        "written": ["best_settings.json"],
+        "baseline": round(before, 4),
+        "front": front,
+    }
+    (out / "front.json").write_text(json.dumps(report, indent=2) + "\n")
+
+    return {
+        **report,
+        # `best`/`score`/`parts`/`oversegmented`/`changed` are just `front[0]`'s
+        # fields lifted to the top level, so a caller that only wants the one
+        # winner does not need to know a front exists.
+        "best": best["settings"],
+        "score": best["score"],
+        "parts": best["parts"],
+        "oversegmented": best["oversegmented"],
+        "changed": best["changed"],
+        "written": ["best_settings.json", "front.csv", "front.json"],
     }
 
 
@@ -294,7 +416,13 @@ def _demo() -> None:
         ann_path, images_dir = fixture(root, count=3)
         dest = root / "out"
 
-        steps = search(ann_path, images_dir, str(dest), trials=25, n=3, category="square")
+        # workers=1: the pool plumbing (pickling, submit/wait/tell, generator
+        # teardown) still runs for real, but completion order stays the ask
+        # order, so the study — and this check — stay reproducible. With more
+        # than one worker, completions can settle out of ask order, which
+        # changes what TPE samples next: real parallelism, at the cost of
+        # `seed=0` only pinning the sampler's own draws, not wall-clock timing.
+        steps = search(ann_path, images_dir, str(dest), trials=25, n=3, category="square", workers=1)
         seen, result = [], None
         while result is None:
             try:
@@ -302,14 +430,16 @@ def _demo() -> None:
             except StopIteration as finished:
                 result = finished.value
         assert seen[0][:2] == (1, 25) and seen[-1][:2] == (25, 25), (seen[0], seen[-1])
-        # The label carries the best score so far, which is the only thing worth
-        # watching during a search — and it may only ever improve.
-        scores = [float(note.rsplit("= ", 1)[1]) for _, _, note in seen]
-        assert scores == sorted(scores), "best-so-far went backwards"
-        assert scores[-1] == result["score"], (scores[-1], result["score"])
+        # The label carries the best IoU so far, which is the only thing worth
+        # watching during a search — and unlike f(θ), it may only ever improve:
+        # a trade-off can trade IoU against recall or spill, never make the best
+        # IoU seen so far worse.
+        ious = [float(note.rsplit("IoU ", 1)[1]) for _, _, note in seen]
+        assert ious == sorted(ious), "best IoU so far went backwards"
 
         # The fixture is bright squares on dark noise, so a threshold exists that
         # nearly nails it. A study that cannot beat the defaults is not searching.
+        assert result["front"], "no non-dominated trial survived the search"
         assert result["score"] > result["baseline"], result
         assert result["score"] > 1.0, f"25 trials found only {result['score']}"
         assert result["images"] == 3 and result["trials"] == 25
@@ -319,7 +449,16 @@ def _demo() -> None:
         cat = coco.category_id("square")
         samples = [got for i in plan(coco, 3, cat) if (got := read(coco, images_dir, i, cat))]
         again = evaluate(samples, Settings(**result["best"]))
-        assert abs(again - result["score"]) < 1e-9, (again, result["score"])
+        # `score` is rounded to 4 decimals for display, so the tolerance is the
+        # rounding step's own, not float noise.
+        assert abs(again - result["score"]) < 5e-5, (again, result["score"])
+
+        # Every trade-off in the front carries the same shape the winner does, so
+        # picking a different one is just as reproducible.
+        for entry in result["front"]:
+            assert set(entry) >= {"settings", "parts", "score", "oversegmented", "changed"}
+            assert Settings(**entry["settings"]).contours_on
+            assert not Settings(**entry["settings"]).roi_on
 
         # It lands on disk in the shape `MainWindow.load_settings` already reads,
         # so Ctrl+L on this file restores the tuning.
@@ -327,6 +466,19 @@ def _demo() -> None:
         assert saved["settings"] == result["best"]
         assert Settings(**saved["settings"]).contours_on, "the mask maker was not saved on"
         assert not Settings(**saved["settings"]).roi_on, "a region would score a crop"
+
+        # front.json is what "Choose result…" reopens later: the whole front, in
+        # the same shape `ParetoDialog` already reads out of a fresh `search()`.
+        reopened = json.loads((dest / "front.json").read_text())
+        assert reopened["front"] == result["front"], "front.json does not match the live result"
+        assert {"dir", "images", "baseline", "weights", "trials"} <= set(reopened)
+
+        # front.csv is the human skim: capped at ten, headed by the searched knobs.
+        with (dest / "front.csv").open(newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        assert len(rows) == min(10, len(result["front"])), len(rows)
+        assert set(SPACE) <= set(rows[0]), "a searched knob is missing from the CSV header"
+        assert float(rows[0]["score"]) == result["front"][0]["score"], rows[0]
 
         # Every winning value has to survive the panel. `Knob` rounds to STEP, so a
         # float off that grid would silently become a different setting the moment

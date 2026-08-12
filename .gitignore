@@ -13,6 +13,7 @@ objects/
 sample/
 summary.json
 best_settings.json
+front.json
 *-analysed/
 *_report/
 .venv/

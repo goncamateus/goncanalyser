@@ -9,11 +9,13 @@ always-visible tabs precisely so they never block the view.
 because by the time it opens the survey it displays has already finished.
 """
 
+import json
 from pathlib import Path
 
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QStandardPaths, QUrl
 from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -24,9 +26,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
 )
@@ -60,6 +65,56 @@ def open_settings(parent) -> str:
         parent, "Load settings", "", "JSON (*.json);;All files (*)"
     )
     return path
+
+
+def open_report(parent) -> str:
+    """Ask for a past optimisation's front.json to reopen. Returns "" when cancelled."""
+    path, _ = QFileDialog.getOpenFileName(
+        parent, "Open a saved optimisation report", "", "Optimisation report (front.json);;All files (*)"
+    )
+    return path
+
+
+def _dialog_cache_file() -> Path:
+    """Where a dataset dialog's last answers live between opens.
+
+    A sibling of `core.settings.cache_file()`, same per-platform config
+    directory, different file — this is dialog-input state (paths, trial
+    count, weights), not the image-processing `Settings` that file holds.
+    """
+    root = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
+    return Path(root) / "dataset_dialogs.json"
+
+
+def _load_dialog_options(name: str) -> dict:
+    """The last answers for one dialog class, or {} if there are none yet.
+
+    Never raises, the same discipline as `core.settings.load_cached` — a
+    missing or unreadable cache just means the dialog starts blank, as it
+    always used to.
+    """
+    try:
+        cache = json.loads(_dialog_cache_file().read_text())
+        return cache.get(name, {}) if isinstance(cache, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_dialog_options(name: str, options: dict) -> None:
+    """Remember one dialog class's answers, keeping every other class's."""
+    try:
+        cache = json.loads(_dialog_cache_file().read_text())
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    cache[name] = options
+    try:
+        path = _dialog_cache_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, indent=2) + "\n")
+    except OSError:
+        pass
 
 
 class ExportDialog(QDialog):
@@ -238,12 +293,30 @@ class _DatasetInputs(QDialog):
             "category": self.category.text().strip(),
         }
 
+    def restore(self, data: dict) -> None:
+        """The inverse of `options`: put a previous run's answers back in the boxes.
+
+        `setText` on the three path fields re-triggers `_refresh` through the
+        `textChanged` connection above, so the OK button's enabled state comes
+        back correct without any extra wiring. Subclasses restore their own
+        controls the same way, calling this first.
+        """
+        self.annotations.setText(data.get("ann_path", ""))
+        self.images.setText(data.get("images_dir", ""))
+        self.folder.setText(data.get("out_dir", ""))
+        if "n" in data:
+            self.count.setValue(data["n"])
+        self.category.setText(data.get("category", ""))
+
     @classmethod
     def ask(cls, parent) -> dict | None:
         dialog = cls(parent)
+        dialog.restore(_load_dialog_options(cls.__name__))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return dialog.options()
+        options = dialog.options()
+        _save_dialog_options(cls.__name__, options)
+        return options
 
 
 class AnalyseDialog(_DatasetInputs):
@@ -317,7 +390,21 @@ class OptimiseDialog(_DatasetInputs):
         column.addWidget(hint)
 
         self.page.addWidget(group)
+
+        choose = self.buttons.addButton("Choose result…", QDialogButtonBox.ButtonRole.ActionRole)
+        choose.setToolTip("reopen a past run's report and apply one of its trade-offs")
+        choose.clicked.connect(self._choose_result)
+
         self.finish()
+
+    def restore(self, data: dict) -> None:
+        super().restore(data)
+        if "trials" in data:
+            self.trials.setValue(data["trials"])
+        weights = data.get("weights")
+        if weights and len(weights) == len(self.weights):
+            for box, value in zip(self.weights, weights):
+                box.setValue(value)
 
     def options(self) -> dict:
         return {
@@ -325,6 +412,29 @@ class OptimiseDialog(_DatasetInputs):
             "trials": self.trials.value(),
             "weights": tuple(box.value() for box in self.weights),
         }
+
+    def _choose_result(self) -> None:
+        """Reopen a past run's front and apply one of its trade-offs directly.
+
+        No search runs: this hands the saved report to the same picker
+        `on_optimised` shows when a search finishes, and applying does exactly
+        what it always did. Then the dialog closes as if Cancel had been
+        pressed — `ask()` sees no accepted result, so `_run_dataset` starts no
+        job, which is correct: there is nothing left to search for.
+        """
+        path = open_report(self)
+        if not path:
+            return
+        try:
+            result = json.loads(Path(path).read_text())
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Cannot open report", str(exc))
+            return
+        result.setdefault("dir", str(Path(path).parent))
+        chosen = ParetoDialog.ask(self, result)
+        if chosen is not None:
+            self.parent().apply_settings(chosen["settings"])
+            self.reject()
 
 
 class DashboardDialog(QDialog):
@@ -362,6 +472,99 @@ class DashboardDialog(QDialog):
         column = QVBoxLayout(self)
         column.addWidget(tabs, 1)
         column.addWidget(buttons)
+
+
+class ParetoDialog(QDialog):
+    """The optimiser's trade-offs: several non-dominated points, not one winner.
+
+    IoU, recall and background spill are searched together rather than folded
+    into one score, so tightening the mask can trade IoU against recall with
+    nothing left to declare a single trial "best" — more than one can be
+    non-dominated. Applying is picking a row, not accepting a verdict; the
+    highest-scoring one by the panel's own weights is selected by default.
+    """
+
+    COLUMNS = ("f(θ)", "IoU", "Recall", "Spill", "Coverage", "Changed")
+
+    def __init__(self, parent, result: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Optimisation finished")
+        self.resize(720, 420)
+        # A single-entry fallback keeps this dialog usable against an older
+        # result dict that only ever had one winner and no front.
+        self.front = result.get("front") or [
+            {
+                "settings": result.get("best", {}),
+                "parts": result.get("parts", {}),
+                "score": result.get("score"),
+                "oversegmented": result.get("oversegmented", False),
+                "changed": result.get("changed", {}),
+            }
+        ]
+
+        header = QLabel(
+            f"{len(self.front)} non-dominated trade-off(s) over {result.get('images')} "
+            f"images, up from f(θ) = {result.get('baseline')} at the current settings."
+        )
+        header.setWordWrap(True)
+
+        table = QTableWidget(len(self.front), len(self.COLUMNS))
+        table.setHorizontalHeaderLabels(self.COLUMNS)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        for row, entry in enumerate(self.front):
+            parts = entry.get("parts", {})
+            coverage = f"{parts.get('coverage', 0) * 100:.1f}%"
+            if entry.get("oversegmented"):
+                coverage += "  ⚠ oversegmented"
+            values = (
+                str(entry.get("score")),
+                str(parts.get("iou")),
+                str(parts.get("recall")),
+                str(parts.get("spill")),
+                coverage,
+                str(len(entry.get("changed") or {})),
+            )
+            for col, text in enumerate(values):
+                table.setItem(row, col, QTableWidgetItem(text))
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        if self.front:
+            table.selectRow(0)  # the highest-scoring trade-off by the panel's weights
+        self.table = table
+
+        column = QVBoxLayout(self)
+        column.addWidget(header)
+        column.addWidget(table, 1)
+        if any(entry.get("oversegmented") for entry in self.front):
+            hint = QLabel(
+                "<i>⚠ marks a trade-off covering far more than the ground "
+                "truth. The spill term is divided by the background, so on "
+                "objects this small it barely penalises a mask that covers "
+                "everything — raise γ and run again for a tighter one.</i>"
+            )
+            hint.setWordWrap(True)
+            column.addWidget(hint)
+        column.addWidget(QLabel(f"<i>Saved to {result.get('dir')}/best_settings.json</i>"))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject)
+        apply = buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
+        apply.clicked.connect(self.accept)
+        column.addWidget(buttons)
+
+    def chosen(self) -> dict | None:
+        rows = self.table.selectionModel().selectedRows()
+        return self.front[rows[0].row()] if rows else None
+
+    @staticmethod
+    def ask(parent, result: dict) -> dict | None:
+        """Show the front; return the chosen trade-off's entry, or None if declined."""
+        dialog = ParetoDialog(parent, result)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.chosen()
 
 
 def _scrolled(widget) -> QScrollArea:
