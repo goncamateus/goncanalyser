@@ -11,6 +11,11 @@ uv run python main.py frames/       # a folder of images
 uv run python main.py shot.png      # one image
 ```
 
+Full documentation, in English and Brazilian Portuguese, with a figure for every
+parameter: **https://goncamateus.github.io/goncanalyser/**. It is built from `docs/`
+by `.github/workflows/deploy-docs.yml`; the figures are generated from this repo's own
+inputs by `docs/make_assets.py`.
+
 ## Install
 
 Linux and macOS builds are on the
