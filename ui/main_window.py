@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         """Image on top, view picker and transport bar underneath."""
         self.video = Viewer()
         self.video.selected.connect(self.on_region_drawn)
+        self.video.open_requested.connect(self.open_file)
 
         # `self.view` is the one control that does not belong to a tab — it
         # decides which tab's output is on screen, so it sits with the image.

@@ -23,9 +23,15 @@ class Viewer(QLabel):
     """Shows frames, and can have a rectangle dragged on it."""
 
     selected = pyqtSignal(int, int, int, int)  # x, y, w, h in *image* pixels
+    # Double-clicking the empty placeholder is the obvious thing to try when the
+    # window opens with nothing in it; only fires while there is no source, so it
+    # cannot throw away a loaded frame by accident.
+    open_requested = pyqtSignal()
 
     def __init__(self):
-        super().__init__("Open video, image, or dataset to begin\nCtrl+O / Ctrl+Shift+O")
+        super().__init__(
+            "Double-click here to open a video or image\nCtrl+O / dataset folder Ctrl+Shift+O"
+        )
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(640, 360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -84,6 +90,11 @@ class Viewer(QLabel):
         self._origin = event.pos()
         self._band.setGeometry(QRect(self._origin, QSize()))
         self._band.show()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self.source_size.isEmpty() and event.button() == Qt.MouseButton.LeftButton:
+            return self.open_requested.emit()
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         if self._band.isVisible():
@@ -144,6 +155,30 @@ def _demo() -> None:
     assert viewer.to_image(QPoint(10, 10)) == QPoint(0, 0)
     viewer.arm(True)
     assert not viewer.armed, "arming with no frame loaded should not take"
+
+    # Double-click opens a file only while empty, never over a loaded frame.
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    asks = []
+    viewer.open_requested.connect(lambda: asks.append(1))
+
+    def double_click() -> None:
+        viewer.mouseDoubleClickEvent(
+            QMouseEvent(
+                QEvent.Type.MouseButtonDblClick,
+                QPointF(10, 10),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+    double_click()
+    assert asks == [1], "double-click on the empty placeholder should ask to open"
+    viewer.source_size = QSize(400, 300)
+    double_click()
+    assert asks == [1], "double-click over a loaded frame should not open a dialog"
 
     print("viewer ok")
     del app
